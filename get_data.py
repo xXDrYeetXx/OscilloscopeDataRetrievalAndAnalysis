@@ -56,6 +56,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 
 import numpy as np
 from scipy.signal import periodogram
@@ -68,7 +69,7 @@ import pyvisa
 
 # Replace with the actual IP address shown on the DSA-X 91304A under:
 #   Utilities > Remote Interface > LAN
-OSCILLOSCOPE_IP = "192.168.1.100"
+OSCILLOSCOPE_IP = "192.168.137.113"
 
 VISA_RESOURCE = f"TCPIP0::{OSCILLOSCOPE_IP}::inst0::INSTR"
 
@@ -78,7 +79,7 @@ CHANNEL = 3
 # Alignment threshold.
 # A subwindow is accepted when abs(mean(V3)) is at or below this value.
 # Start with 10 mV and tighten once you observe the physical stability.
-ZERO_MEAN_THRESHOLD = 10e-3          # volts
+ZERO_MEAN_THRESHOLD = 5e-3          # volts
 
 # Frequency where noise power is extracted.
 TARGET_FREQUENCY_HZ = 10e6          # 10 MHz
@@ -123,6 +124,12 @@ ACQUISITION_INTERVAL_SECONDS = 0.0
 # Keysight or NI-VISA library is installed.
 PYVISA_BACKEND = "@py"
 
+# Vertical scale for Channel 3 (Volts per division).
+# 10 mV/div (0.010 V) gives an 80 mV full-scale window, dramatically reducing ADC noise.
+CHANNEL_VERTICAL_SCALE_VOLTS = 10e-3
+
+# Vertical offset in volts (keep at 0 V to center around zero).
+CHANNEL_VERTICAL_OFFSET_VOLTS = 0.0
 
 # =====================================================================
 # FIXED CONSTANTS
@@ -155,15 +162,18 @@ def query_float(scope, command: str) -> float:
 def configure_scope(scope):
     """
     Prepare the oscilloscope for repeated Channel 3 acquisitions.
-
-    The FFT is not configured on the scope because all spectral
-    analysis is performed locally in Python.
     """
     scope.write("*CLS")
     scope.write(":SYSTem:HEADer OFF")
     scope.write(f":CHANnel{CHANNEL}:DISPlay ON")
+
+    # Force vertical scale (Volts/Div) and Offset to prevent 1V auto-defaulting
+    scope.write(f":CHANnel{CHANNEL}:SCALe {CHANNEL_VERTICAL_SCALE_VOLTS}")
+    scope.write(f":CHANnel{CHANNEL}:OFFSet {CHANNEL_VERTICAL_OFFSET_VOLTS}")
+
     scope.write(f":TIMebase:RANGe {LONG_RECORD_DURATION_SECONDS}")
     scope.write(f":ACQuire:SRATe {REQUESTED_SAMPLE_RATE_HZ}")
+    scope.write(":WAVeform:STReaming OFF")
     scope.write(
         f":ACQuire:POINts:ANALog {REQUESTED_ACQUISITION_POINTS}"
     )
@@ -173,15 +183,13 @@ def configure_scope(scope):
 def read_channel_waveform(scope):
     """
     Download the completed Channel 3 waveform in ASCII (volts).
-
-    Returns
-    -------
-    time_seconds         : time coordinate of each sample
-    voltage_volts        : Channel 3 voltage samples
-    sample_interval_s    : time between adjacent samples
     """
     scope.write(f":WAVeform:SOURce CHANnel{CHANNEL}")
     scope.write(":WAVeform:FORMat ASCii")
+
+    # Force Infiniium scope to export un-decimated raw memory at full 1 GSa/s
+    scope.write(":WAVeform:POINts:MODE RAW")
+    scope.write(f":WAVeform:POINts {REQUESTED_ACQUISITION_POINTS}")
 
     sample_interval_s = query_float(scope, ":WAVeform:XINCrement?")
     time_origin_s = query_float(scope, ":WAVeform:XORigin?")
@@ -197,13 +205,12 @@ def read_channel_waveform(scope):
         )
 
     time_seconds = (
-        time_origin_s
-        + np.arange(voltage_volts.size, dtype=np.float64)
-        * sample_interval_s
+            time_origin_s
+            + np.arange(voltage_volts.size, dtype=np.float64)
+            * sample_interval_s
     )
 
     return time_seconds, voltage_volts, sample_interval_s
-
 
 # =====================================================================
 # DATA CLEANING
@@ -516,13 +523,47 @@ def save_settings(
 # MAIN LOOP
 # =====================================================================
 
+def get_next_run_directory(base_directory: Path) -> Path:
+    """
+    Find existing directories named 'Run N' and create the next run directory.
+
+    Examples:
+        If Run 1 and Run 2 exist -> create Run 3.
+        If no Run N directories exist -> create Run 1.
+    """
+    base_directory.mkdir(parents=True, exist_ok=True)
+
+    highest_run_number = 0
+
+    for path in base_directory.iterdir():
+        if not path.is_dir():
+            continue
+
+        # Corrected regex string (single backslash in raw string)
+        match = re.fullmatch(r"Run (\d+)", path.name)
+        if match is None:
+            continue
+
+        run_number = int(match.group(1))
+        highest_run_number = max(highest_run_number, run_number)
+
+    next_run_number = highest_run_number + 1
+    run_directory = base_directory / f"Run {next_run_number}"
+    run_directory.mkdir(parents=True, exist_ok=True)
+
+    return run_directory
+
 def main():
-    output_directory = Path(OUTPUT_DIRECTORY).expanduser().resolve()
+    base_directory = Path(OUTPUT_DIRECTORY).expanduser().resolve()
+
+    # Automatically create the next Run N directory.
+    output_directory = get_next_run_directory(base_directory)
     spectra_directory = output_directory / "zero_spectra"
 
-    output_directory.mkdir(parents=True, exist_ok=True)
     if SAVE_ZERO_SPECTRA:
         spectra_directory.mkdir(parents=True, exist_ok=True)
+
+    print(f"Created new run directory: {output_directory}")
 
     all_pairs_path = output_directory / "all_pairs.csv"
     zero_pairs_path = output_directory / "zero_pairs.csv"
@@ -569,6 +610,7 @@ def main():
 
                 # Freeze one complete acquisition before reading data.
                 scope.query(":SINGle;*OPC?")
+                time.sleep(0.1)
 
                 (
                     time_seconds,

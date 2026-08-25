@@ -7,17 +7,18 @@ near zero. If it is not, one side is overrepresented, which could bias
 the noise measurement.
 
 This script:
-    1. Loads zero_pairs.csv
-    2. Calculates the signed sum of V3 means
-    3. Decides if balancing is needed
-    4. If so, randomly removes pairs from the overrepresented side
-       until the signed sum is within the balance threshold
-    5. Saves the balanced dataset to zero_pairs_balanced.csv
-    6. Reports mean noise power before and after balancing in watts
-       and dBm
+    1. Locates the target run directory (defaults to the latest Run N).
+    2. Loads zero_pairs.csv from that run folder.
+    3. Calculates the signed sum of V3 means.
+    4. Decides if balancing is needed.
+    5. If so, randomly removes pairs from the overrepresented side
+       until the signed sum is within the balance threshold.
+    6. Saves the balanced dataset to zero_pairs_balanced.csv in the same run folder.
+    7. Reports mean noise power before and after balancing in watts and dBm.
 
 Usage:
-    python balance_pairs.py
+    python balance_pairs.py                     # Balances latest run
+    python balance_pairs.py --run 2             # Balances Run 2
     python balance_pairs.py --input path/to/zero_pairs.csv
 """
 
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import math
 import random
+import re
 from pathlib import Path
 
 import numpy as np
@@ -36,17 +38,54 @@ import pandas as pd
 # CONFIGURATION
 # =====================================================================
 
-INPUT_CSV        = "v3_segmented_noise_data/zero_pairs.csv"
-OUTPUT_CSV       = "v3_segmented_noise_data/zero_pairs_balanced.csv"
+BASE_DIRECTORY = "v3_segmented_noise_data"
 
 # The signed sum of V3 means must fall within this range to be
 # considered balanced. Expressed in volts.
-# Default: 1 mV — tighten if your detector is very stable.
 BALANCE_THRESHOLD_VOLTS = 1e-3
 
 # Random seed for reproducibility. Set to None for a different
 # random removal each run.
 RANDOM_SEED = 42
+
+
+# =====================================================================
+# RUN DIRECTORY RESOLUTION
+# =====================================================================
+
+def find_target_run_directory(base_dir: Path, run_number: int | None = None) -> Path:
+    """
+    Find a specific 'Run N' directory, or locate the highest numbered run directory.
+    """
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Base output directory does not exist: {base_dir}")
+
+    if run_number is not None:
+        target_dir = base_dir / f"Run {run_number}"
+        if not target_dir.exists():
+            raise FileNotFoundError(f"Requested run directory does not exist: {target_dir}")
+        return target_dir
+
+    highest_run_number = 0
+    latest_dir = None
+
+    for path in base_dir.iterdir():
+        if not path.is_dir():
+            continue
+
+        match = re.fullmatch(r"Run (\d+)", path.name)
+        if match is None:
+            continue
+
+        num = int(match.group(1))
+        if num > highest_run_number:
+            highest_run_number = num
+            latest_dir = path
+
+    if latest_dir is None:
+        raise FileNotFoundError(f"No 'Run N' directories found inside {base_dir}")
+
+    return latest_dir
 
 
 # =====================================================================
@@ -130,14 +169,10 @@ def balance_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
             break
 
         if signed_sum > 0:
-            # Positive side is overrepresented — remove a random
-            # positive pair.
             candidates = balanced_df[
                 balanced_df["v3_mean_volts"] > 0
             ].index.tolist()
         else:
-            # Negative side is overrepresented — remove a random
-            # negative pair.
             candidates = balanced_df[
                 balanced_df["v3_mean_volts"] < 0
             ].index.tolist()
@@ -244,16 +279,24 @@ def print_report(
 # =====================================================================
 
 def parse_arguments():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Balance zero_pairs.csv within run directories."
+    )
+    parser.add_argument(
+        "--run",
+        type=int,
+        default=None,
+        help="Run number to process (e.g. --run 1). Defaults to the latest run.",
+    )
     parser.add_argument(
         "--input",
-        default=INPUT_CSV,
-        help="Path to zero_pairs.csv",
+        default=None,
+        help="Direct path to zero_pairs.csv (overrides --run detection).",
     )
     parser.add_argument(
         "--output",
-        default=OUTPUT_CSV,
-        help="Path for the balanced output CSV",
+        default=None,
+        help="Direct path for output CSV (defaults to zero_pairs_balanced.csv in the same run folder).",
     )
     parser.add_argument(
         "--threshold",
@@ -268,14 +311,35 @@ def parse_arguments():
 
 
 def main():
-    args       = parse_arguments()
-    csv_path   = Path(args.input).expanduser().resolve()
-    output_path = Path(args.output).expanduser().resolve()
+    args = parse_arguments()
 
     global BALANCE_THRESHOLD_VOLTS
     BALANCE_THRESHOLD_VOLTS = args.threshold
 
-    print(f"Loading: {csv_path}")
+    if args.input:
+        csv_path = Path(args.input).expanduser().resolve()
+        output_path = (
+            Path(args.output).expanduser().resolve()
+            if args.output
+            else csv_path.parent / "zero_pairs_balanced.csv"
+        )
+    else:
+        base_dir = Path(BASE_DIRECTORY).expanduser().resolve()
+        run_dir = find_target_run_directory(base_dir, args.run)
+        csv_path = run_dir / "zero_pairs.csv"
+        output_path = (
+            Path(args.output).expanduser().resolve()
+            if args.output
+            else run_dir / "zero_pairs_balanced.csv"
+        )
+
+    print(f"Target run file : {csv_path}")
+    print(f"Output path     : {output_path}")
+
+    if not csv_path.exists():
+        print(f"Error: Could not find '{csv_path.name}' at {csv_path}")
+        return
+
     df = load_data(csv_path)
     print(f"Pairs loaded: {len(df)}")
 

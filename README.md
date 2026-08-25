@@ -1,3 +1,5 @@
+Disclaimer: lots of ai was used to make this stuff
+
 \# Oscilloscope Data Retrieval and Analysis
 
 

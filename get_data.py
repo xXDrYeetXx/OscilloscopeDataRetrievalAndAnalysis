@@ -281,11 +281,6 @@ def calculate_noise_at_frequency(
             "Subwindow contains too few samples for a periodogram."
         )
 
-    # scipy.signal.periodogram handles:
-    #   - Hann windowing
-    #   - DC detrending (detrend='constant' subtracts the mean)
-    #   - one-sided normalization
-    #   - density scaling (V^2/Hz)
     frequency_hz, voltage_psd = periodogram(
         voltage_volts,
         fs=sample_rate_hz,
@@ -295,25 +290,18 @@ def calculate_noise_at_frequency(
         scaling="density",
     )
 
-    # Convert voltage PSD to power PSD.
     power_psd_w_per_hz = voltage_psd / impedance_ohms
 
-    # Hann window equivalent noise bandwidth.
-    # For a length-N Hann window:
-    #     ENBW = fs * sum(w^2) / sum(w)^2
-    # which is approximately 1.5 * fs / N.
     n = voltage_volts.size
     w = np.hanning(n)
     enbw_hz = float(
         sample_rate_hz * np.sum(w ** 2) / (np.sum(w) ** 2)
     )
 
-    # Select the bin nearest the target frequency.
     index = int(np.argmin(np.abs(frequency_hz - target_frequency_hz)))
     actual_frequency_hz = float(frequency_hz[index])
     noise_psd_w_per_hz = float(power_psd_w_per_hz[index])
 
-    # Noise power in the effective bandwidth of one bin.
     noise_power_watts = noise_psd_w_per_hz * enbw_hz
 
     if noise_power_watts > 0 and math.isfinite(noise_power_watts):
@@ -539,7 +527,6 @@ def get_next_run_directory(base_directory: Path) -> Path:
         if not path.is_dir():
             continue
 
-        # Corrected regex string (single backslash in raw string)
         match = re.fullmatch(r"Run (\d+)", path.name)
         if match is None:
             continue
@@ -553,10 +540,10 @@ def get_next_run_directory(base_directory: Path) -> Path:
 
     return run_directory
 
+
 def main():
     base_directory = Path(OUTPUT_DIRECTORY).expanduser().resolve()
 
-    # Automatically create the next Run N directory.
     output_directory = get_next_run_directory(base_directory)
     spectra_directory = output_directory / "zero_spectra"
 
@@ -602,6 +589,11 @@ def main():
         long_acquisition_number = 0
         global_pair_number = 0
         zero_event_number = 0
+
+        # NEW: counters for qualifying zero measurements only.
+        zero_negative_count = 0
+        zero_positive_count = 0
+
         settings_saved = False
 
         while not stop_requested:
@@ -706,6 +698,13 @@ def main():
                     if aligned:
                         zero_event_number += 1
 
+                        # NEW: count the sign of mean(V3) for measurements
+                        # that are actually being saved to zero_pairs.csv.
+                        if v3_mean < 0:
+                            zero_negative_count += 1
+                        elif v3_mean > 0:
+                            zero_positive_count += 1
+
                         if SAVE_ZERO_SPECTRA:
                             spectrum_filename = save_zero_spectrum(
                                 spectra_directory=spectra_directory,
@@ -754,8 +753,11 @@ def main():
                             f"ALIGNED #{zero_event_number}: "
                             f"pair={global_pair_number}, "
                             f"|mean(V3)|={abs_v3_mean * 1e3:.4f} mV, "
+                            f"mean(V3)={v3_mean * 1e3:+.4f} mV, "
                             f"noise={noise_power_dbm:.3f} dBm at "
-                            f"{actual_frequency_hz / 1e6:.6f} MHz"
+                            f"{actual_frequency_hz / 1e6:.6f} MHz, "
+                            f"zero<0={zero_negative_count}, "
+                            f"zero>0={zero_positive_count}"
                         )
                     else:
                         print(
@@ -789,6 +791,21 @@ def main():
         )
         print(f"Total ordered pairs : {global_pair_number}")
         print(f"Aligned pairs saved : {zero_event_number}")
+
+        # NEW: final sign breakdown of the zero_pairs.csv measurements.
+        print(f"  V3 mean < 0       : {zero_negative_count}")
+        print(f"  V3 mean > 0       : {zero_positive_count}")
+
+        if zero_event_number > 0:
+            print(
+                f"  V3 mean < 0       : "
+                f"{zero_negative_count / zero_event_number * 100:.1f}%"
+            )
+            print(
+                f"  V3 mean > 0       : "
+                f"{zero_positive_count / zero_event_number * 100:.1f}%"
+            )
+
         print(f"Results written to  : {output_directory}")
 
     finally:

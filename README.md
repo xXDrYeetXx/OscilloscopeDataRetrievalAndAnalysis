@@ -28,7 +28,7 @@ done using hardware, and uses the average value of \(V_3\) to determine detector
 | ---------------------------------------------- | ------------------------------------------------ |
 | `get_data_legacy.py`                                  | Basic continuous data acquisition                |
 | `get_data_with_convergence.py`                 | Acquisition with automatic convergence detection |
-| `analyze_run.py`                               | Statistical analysis of an acquired run          |
+| `analyze_single_run.py`                               | Statistical analysis of an acquired run          |
 | `AI Generated Report.md`                       | Project background and methodology               |
 | `KeysightInfiniiumOscilloscopesGuideForAI.txt` | Keysight oscilloscope reference material         |
 
@@ -172,7 +172,7 @@ Stores the acquisition and analysis settings used for the run.
 Run:
 
 ```bash
-python analyze_run.py
+python analyze_single_run.py
 ```
 
 The analysis examines the relationship between detector imbalance and measured noise. It includes:

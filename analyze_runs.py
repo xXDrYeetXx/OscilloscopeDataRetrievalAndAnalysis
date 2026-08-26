@@ -14,7 +14,7 @@ plt.rcParams["font.size"] = 10
 
 
 def parse_run_input(input_str: str) -> list[int]:
-    """Parses expressions like '1,3-5,7-20,23' into a sorted list of unique run numbers."""
+    """Parses expressions like '1,3-5,7-20' into a sorted list of unique run numbers."""
     runs = set()
     parts = input_str.strip().split(",")
     for part in parts:
@@ -38,11 +38,11 @@ def parse_run_input(input_str: str) -> list[int]:
 
 
 def extract_data_from_runs(
-    run_numbers: list[int], base_folder: str = "."
+    run_numbers: list[int], base_folder: str = "v3_converged_noise_data"
 ) -> pd.DataFrame:
-    """Iterates through specified Run directories and extracts beam power (mW) and linear noise power (nW)
+    """Iterates through specified Run directories and extracts beam power (mW)
 
-    from converged_result.json.
+    and linear noise power standardized strictly to mW.
     """
     base_dir = Path(base_folder).expanduser().resolve()
     records = []
@@ -66,18 +66,17 @@ def extract_data_from_runs(
 
             power_mw = float(data["beam_power_mw"])
             noise_watts = float(data["final_mean_watts"])
-            noise_nw = noise_watts * 1e9  # Convert Watts -> nW
+            noise_mw = noise_watts * 1e3  # Convert Watts -> mW
 
             records.append(
                 {
                     "Run": run_num,
                     "Power_mW": power_mw,
-                    "Noise_nW": noise_nw,
-                    "Noise_Watts": noise_watts,
+                    "Noise_mW": noise_mw,
                 }
             )
             print(
-                f"  • Run {run_num:2d}: Loaded P = {power_mw:.4f} mW | N = {noise_nw:.6f} nW"
+                f"  • Run {run_num:2d}: Loaded Power = {power_mw:.4f} mW | Noise = {noise_mw:.6e} mW"
             )
 
         except KeyError as ke:
@@ -124,7 +123,7 @@ def main():
             print(f"Input Error: {err}. Please try again.\n")
 
     # ------------------------------------------------------------------
-    # 2. Load JSON data for each selected run
+    # 2. Load JSON data for each selected run (All values in mW)
     # ------------------------------------------------------------------
     df = extract_data_from_runs(run_list)
     n = len(df)
@@ -132,45 +131,46 @@ def main():
     # ------------------------------------------------------------------
     # 3. Linear Regression & Residual Calculations
     # ------------------------------------------------------------------
+    # Model: Noise(mW) = k * Power(mW) + Dark_Noise(mW)
     slope, intercept, r_value, p_value, std_err = linregress(
-        df["Power_mW"], df["Noise_nW"]
+        df["Power_mW"], df["Noise_mW"]
     )
-    k, N_dark_nW = slope, intercept
+    k, N_dark_mw = slope, intercept
     r_squared = r_value**2
 
     # Intercept Standard Error calculation
-    x_mean = df["Power_mW"].mean()
+    n_pts = len(df)
     intercept_std_err = (
         std_err
-        * np.sqrt(np.sum(df["Power_mW"] ** 2) / n)
+        * np.sqrt(np.sum(df["Power_mW"] ** 2) / n_pts)
         / np.std(df["Power_mW"], ddof=0)
     )
 
-    df["Predicted_nW"] = k * df["Power_mW"] + N_dark_nW
-    df["Residual_nW"] = df["Noise_nW"] - df["Predicted_nW"]
-    max_residual = np.max(np.abs(df["Residual_nW"]))
+    df["Predicted_mW"] = k * df["Power_mW"] + N_dark_mw
+    df["Residual_mW"] = df["Noise_mW"] - df["Predicted_mW"]
+    max_residual = np.max(np.abs(df["Residual_mW"]))
 
     # ------------------------------------------------------------------
-    # 4. Print Statistical Analysis Report
+    # 4. Print Statistical Analysis Report (Standardized to mW)
     # ------------------------------------------------------------------
     print("\n==========================================================")
     print("             PHOTODETECTOR FIT STATISTICS                 ")
     print("==========================================================")
-    print(" Linear Model:              N = k * P + N_dark            ")
+    print(" Model: Noise(mW) = constant * Power(mW) + Dark Noise(mW) ")
     print(f" Extracted Data Runs:       {n} successful runs           ")
     print("----------------------------------------------------------")
-    print(f" Responsiveness Slope (k):  {k:.6f} ± {std_err:.6f} nW/mW")
+    print(f" Responsiveness Slope (k):  {k:.6e} ± {std_err:.6e} (dimensionless)")
     print(
-        f" Dark Floor (N_dark):       {N_dark_nW:.6f} ± {intercept_std_err:.6f} nW"
+        f" Dark Noise (N_dark):       {N_dark_mw:.6e} ± {intercept_std_err:.6e} mW"
     )
-    if N_dark_nW > 0:
-        dbm_val = 10 * np.log10(N_dark_nW * 1e-6)
+    if N_dark_mw > 0:
+        dbm_val = 10 * np.log10(N_dark_mw)
         print(f" Predicted Dark Floor dBm:  {dbm_val:.3f} dBm")
     print("----------------------------------------------------------")
     print(f" Coefficient of Det. (R²):  {r_squared:.6f}")
     print(f" Correlation Coeff. (r):    {r_value:.6f}")
     print(f" Two-Tailed p-value:        {p_value:.6e}")
-    print(f" Max Absolute Residual:     {max_residual:.6f} nW")
+    print(f" Max Absolute Residual:     {max_residual:.6e} mW")
     print("==========================================================\n")
 
     # ------------------------------------------------------------------
@@ -178,7 +178,7 @@ def main():
     # ------------------------------------------------------------------
     max_p = df["Power_mW"].max() * 1.1 if df["Power_mW"].max() > 0 else 2.0
     P_model = np.linspace(0, max_p, 100)
-    N_total_model = k * P_model + N_dark_nW
+    N_total_model = k * P_model + N_dark_mw
     N_shot_model = k * P_model
 
     fig, (ax_main, ax_res) = plt.subplots(
@@ -190,12 +190,15 @@ def main():
     )
 
     # --- TOP PANEL ---
+    # Formula formatted in legend key
+    formula_label = f"Total Fit: $\\text{{Noise(mW)}} = {k:.3e} \\cdot \\text{{Power(mW)}} + {N_dark_mw:.3e}\\text{{ mW}}$ ($R^2={r_squared:.4f}$)"
+
     ax_main.plot(
         P_model,
         N_total_model,
         color="#1f77b4",
         linewidth=2,
-        label=f"Total Fit: $N = {k:.3f}P + {N_dark_nW:.3f}$ nW ($R^2={r_squared:.4f}$)",
+        label=formula_label,
     )
 
     ax_main.plot(
@@ -204,12 +207,12 @@ def main():
         color="#2ca02c",
         linestyle="--",
         linewidth=2,
-        label="Calibrated Shot-Noise Limit ($N - N_{\\text{dark}}$)",
+        label="Calibrated Shot-Noise Limit: $\\text{Noise(mW)} = \\text{constant} \\cdot \\text{Power(mW)}$",
     )
 
     ax_main.scatter(
         df["Power_mW"],
-        df["Noise_nW"],
+        df["Noise_mW"],
         color="#1f77b4",
         s=50,
         zorder=4,
@@ -218,12 +221,12 @@ def main():
 
     ax_main.scatter(
         [0],
-        [N_dark_nW],
+        [N_dark_mw],
         color="#d62728",
         marker="D",
         s=65,
         zorder=5,
-        label=f"Dark Floor Intersect $(0, {N_dark_nW:.3f})$",
+        label=f"Dark Noise Intersect $(0, {N_dark_mw:.3e}\\text{{ mW}})$",
     )
     ax_main.scatter(
         [0],
@@ -235,11 +238,11 @@ def main():
         label="SNL Origin Intersect $(0, 0)$",
     )
 
-    # Annotations
+    # Annotations on Intersects
     ax_main.annotate(
-        f"$(0.000, {N_dark_nW:.3f})$ nW",
-        xy=(0, N_dark_nW),
-        xytext=(max_p * 0.05, N_dark_nW + 0.15),
+        f"$(0.000, {N_dark_mw:.3e})$ mW",
+        xy=(0, N_dark_mw),
+        xytext=(max_p * 0.05, N_dark_mw * 1.3 if N_dark_mw > 0 else 0.1),
         arrowprops=dict(arrowstyle="->", color="#d62728", lw=1.2),
         fontsize=9.5,
         fontweight="bold",
@@ -253,9 +256,9 @@ def main():
     )
 
     ax_main.annotate(
-        "$(0.000, 0.000)$ nW",
+        "$(0.000, 0.000)$ mW",
         xy=(0, 0),
-        xytext=(max_p * 0.07, 0.18),
+        xytext=(max_p * 0.07, max(df["Noise_mW"]) * 0.05),
         arrowprops=dict(arrowstyle="->", color="#2ca02c", lw=1.2),
         fontsize=9.5,
         fontweight="bold",
@@ -269,11 +272,11 @@ def main():
     )
 
     ax_main.set_xlim(left=0, right=max_p)
-    ax_main.set_ylim(bottom=-0.1)
+    ax_main.set_ylim(bottom=-0.05 * max(df["Noise_mW"]))
     ax_main.margins(x=0)
     ax_res.margins(x=0)
 
-    ax_main.set_ylabel("Linear Noise Power (nW)", fontsize=11)
+    ax_main.set_ylabel("Linear Noise Power (mW)", fontsize=11)
     ax_main.set_title(
         "Photodetector Noise Calibration: Y-Axis Intersects & SNL Baseline",
         fontsize=12,
@@ -288,18 +291,18 @@ def main():
     ax_res.axhline(0, color="gray", linestyle="--", linewidth=1)
     ax_res.scatter(
         df["Power_mW"],
-        df["Residual_nW"],
+        df["Residual_mW"],
         color="#1f77b4",
         s=40,
         marker="o",
         zorder=3,
     )
 
-    ax_res.set_xlabel("Optical Beam Power $P$ (mW)", fontsize=11)
-    ax_res.set_ylabel("Residuals (nW)", fontsize=10)
+    ax_res.set_xlabel("Optical Beam Power (mW)", fontsize=11)
+    ax_res.set_ylabel("Residuals (mW)", fontsize=10)
     ax_res.grid(True, linestyle=":", alpha=0.6)
 
-    res_bound = max_residual * 1.5 if max_residual > 0 else 0.1
+    res_bound = max_residual * 1.5 if max_residual > 0 else 1e-10
     ax_res.set_ylim(-res_bound, res_bound)
 
     plt.tight_layout()

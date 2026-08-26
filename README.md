@@ -8,7 +8,7 @@ $$
 V_3(t) = V_1(t) - V_2(t)
 $$
 
-and uses the average value of \(V_3\) to determine detector balance. When the detector is sufficiently balanced, the program measures noise near **10 MHz** from the same waveform segment.
+done using hardware, and uses the average value of \(V_3\) to determine detector balance. When the detector is sufficiently balanced, the program measures noise near **10 MHz** from the same waveform segment.
 
 ## Features
 

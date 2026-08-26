@@ -26,7 +26,7 @@ done using hardware, and uses the average value of \(V_3\) to determine detector
 
 | File                                           | Description                                      |
 | ---------------------------------------------- | ------------------------------------------------ |
-| `get_data.py`                                  | Basic continuous data acquisition                |
+| `get_data_legacy.py`                                  | Basic continuous data acquisition                |
 | `get_data_with_convergence.py`                 | Acquisition with automatic convergence detection |
 | `analyze_run.py`                               | Statistical analysis of an acquired run          |
 | `AI Generated Report.md`                       | Project background and methodology               |
@@ -117,7 +117,7 @@ Balance and noise are therefore measured from the **same physical time interval*
 For continuous acquisition:
 
 ```bash
-python get_data.py
+python get_data_legacy.py
 ```
 
 For acquisition with automatic convergence:

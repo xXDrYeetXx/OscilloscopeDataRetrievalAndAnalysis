@@ -1,49 +1,48 @@
 #!/usr/bin/env python3
 """
-Analyze the relationship between V3 imbalance and measured noise
-for one or more acquisition runs.
+Estimate measured noise at V3 = 0.
 
-IMPORTANT:
-    This script does NOT balance the data.
-    This script does NOT randomly delete observations.
-    This script does NOT create an edited CSV dataset.
+Scientific interpretation
+-------------------------
+A previous analysis found no meaningful relationship between V3 and
+measured noise within the selected near-zero range. Under the resulting
+flat-near-zero assumption, this script estimates the noise at V3 = 0 by
+pooling qualifying near-zero observations.
 
-It preserves the physical distribution of V3 exactly as measured.
+To avoid treating correlated subwindows from one oscilloscope record as
+independent repetitions:
 
-For each Run N directory it:
-    1. Locates zero_pairs.csv.
-    2. Loads all valid qualifying observations.
-    3. Reports the natural signed V3 distribution.
-    4. Reports noise statistics versus |V3|.
-    5. Performs continuous |V3| regression.
-    6. Performs signed-V3 regression.
-    7. Performs a |V3| window sweep.
-    8. Reports noise for positive and negative V3 separately.
-    9. Reports chronological block statistics.
-   10. Reports whether the apparent noise improvement at smaller |V3|
-       is actually supported by the data.
+    1. Noise power is averaged in linear watts within each long acquisition.
+    2. The acquisition-level means are averaged with equal weight.
+    3. Whole acquisitions are bootstrap-resampled for a 95% confidence
+       interval.
+    4. Watts are converted to dBm only after averaging.
 
-No observations are removed.
+The result is the mean measured power near V3 = 0 in the acquisition
+script's effective noise bandwidth. It is not a dBm average and is not
+the total broadband noise.
 
 Usage
 -----
-
 Analyze latest run:
 
-    python analyze_v3.py
+    python analyze_zero_noise.py
 
 Analyze a specific run:
 
-    python analyze_v3.py --run 2
+    python analyze_zero_noise.py --run 2
 
-Analyze every run:
+Analyze every run separately:
 
-    python analyze_v3.py --all
+    python analyze_zero_noise.py --all
 
 Use a custom base directory:
 
-    python analyze_v3.py --base "C:\\path\\to\\v3_segmented_noise_data"
+    python analyze_zero_noise.py --base "/path/to/v3_segmented_noise_data"
 
+Override the near-zero range:
+
+    python analyze_zero_noise.py --max-abs-v3-mv 5.0
 """
 
 from __future__ import annotations
@@ -55,7 +54,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 
 # =====================================================================
@@ -64,48 +62,45 @@ from scipy import stats
 
 BASE_DIRECTORY = "v3_segmented_noise_data"
 
-# |V3| windows to investigate.
-WINDOWS_MV = [
-    0.5,
-    1.0,
-    1.5,
-    2.0,
-    2.5,
-    3.0,
-    3.5,
-    4.0,
-    4.5,
-    5.0,
-]
+# Analyze observations satisfying |mean(V3)| <= this value.
+MAX_ABS_V3_MV = 5.0
 
-# Number of chronological observations per block.
-BLOCK_SIZE = 25
-
-# Minimum observations required before reporting a window.
-MIN_WINDOW_OBSERVATIONS = 5
-
-# Bootstrap repetitions for confidence intervals.
-BOOTSTRAP_REPETITIONS = 5000
+# Number of acquisition-level bootstrap repetitions.
+BOOTSTRAP_REPETITIONS = 10_000
 
 # Reproducible bootstrap.
 RANDOM_SEED = 42
+
+# Percentile confidence interval.
+CONFIDENCE_LEVEL = 0.95
+
+
+# =====================================================================
+# UNIT CONVERSION
+# =====================================================================
+
+def watts_to_dbm(watts: float) -> float:
+    """Convert positive power in watts to dBm."""
+    if not math.isfinite(watts) or watts <= 0:
+        return math.nan
+
+    return 10.0 * math.log10(watts / 1e-3)
 
 
 # =====================================================================
 # RUN DIRECTORY RESOLUTION
 # =====================================================================
 
-def find_run_directories(base_dir: Path) -> list[Path]:
+def find_run_directories(base_directory: Path) -> list[Path]:
     """Return all Run N directories in numerical order."""
-
-    if not base_dir.exists():
+    if not base_directory.exists():
         raise FileNotFoundError(
-            f"Base directory does not exist:\n{base_dir}"
+            f"Base directory does not exist:\n{base_directory}"
         )
 
-    runs = []
+    runs: list[tuple[int, Path]] = []
 
-    for path in base_dir.iterdir():
+    for path in base_directory.iterdir():
         if not path.is_dir():
             continue
 
@@ -116,881 +111,419 @@ def find_run_directories(base_dir: Path) -> list[Path]:
 
     if not runs:
         raise FileNotFoundError(
-            f"No Run N directories found in:\n{base_dir}"
+            f"No Run N directories found in:\n{base_directory}"
         )
 
-    runs.sort(key=lambda x: x[0])
+    runs.sort(key=lambda item: item[0])
 
     return [path for _, path in runs]
 
 
 def find_target_run(
-    base_dir: Path,
-    run_number: int | None = None,
+    base_directory: Path,
+    run_number: int | None,
 ) -> Path:
-
-    runs = find_run_directories(base_dir)
+    """Find a specified run or the latest run."""
+    runs = find_run_directories(base_directory)
 
     if run_number is None:
         return runs[-1]
 
+    expected_name = f"Run {run_number}"
+
     for path in runs:
-        if path.name == f"Run {run_number}":
+        if path.name == expected_name:
             return path
 
     raise FileNotFoundError(
-        f"Run {run_number} does not exist in:\n{base_dir}"
+        f"{expected_name} does not exist in:\n{base_directory}"
     )
 
 
 # =====================================================================
-# DATA LOADING
+# DATA LOADING AND VALIDATION
 # =====================================================================
 
-def load_data(csv_path: Path) -> pd.DataFrame:
+def load_zero_data(
+    csv_path: Path,
+    max_abs_v3_mv: float,
+) -> tuple[pd.DataFrame, int, int]:
+    """
+    Load valid near-zero observations.
 
+    Returns
+    -------
+    data
+        Valid observations inside the requested V3 range.
+    original_rows
+        Number of rows originally present.
+    excluded_rows
+        Number of rows excluded by validity and range checks.
+    """
     if not csv_path.exists():
         raise FileNotFoundError(
             f"Could not find:\n{csv_path}"
         )
 
-    df = pd.read_csv(csv_path)
+    data = pd.read_csv(csv_path)
+    original_rows = len(data)
 
-    required = [
+    required_columns = [
+        "long_acquisition_number",
         "noise_power_watts",
-        "noise_power_dbm",
         "v3_mean_volts",
-        "abs_v3_mean_volts",
-        "global_pair_number",
     ]
 
-    missing = [c for c in required if c not in df.columns]
+    missing = [
+        column
+        for column in required_columns
+        if column not in data.columns
+    ]
 
     if missing:
         raise ValueError(
             f"CSV is missing required columns: {missing}"
         )
 
-    # Convert numeric columns.
-    numeric_columns = [
-        "noise_power_watts",
-        "noise_power_dbm",
-        "v3_mean_volts",
-        "abs_v3_mean_volts",
-        "global_pair_number",
+    optional_numeric_columns = [
+        "enbw_hz",
+        "actual_fft_bin_frequency_hz",
+        "requested_frequency_hz",
+    ]
+
+    numeric_columns = required_columns + [
+        column
+        for column in optional_numeric_columns
+        if column in data.columns
     ]
 
     for column in numeric_columns:
-        df[column] = pd.to_numeric(
-            df[column],
+        data[column] = pd.to_numeric(
+            data[column],
             errors="coerce",
         )
 
-    # Keep only physically valid noise measurements.
+    data["abs_v3_mv"] = np.abs(
+        data["v3_mean_volts"]
+    ) * 1e3
+
     valid = (
-        np.isfinite(df["noise_power_watts"])
-        & (df["noise_power_watts"] > 0)
-        & np.isfinite(df["v3_mean_volts"])
-        & np.isfinite(df["abs_v3_mean_volts"])
+        np.isfinite(data["long_acquisition_number"])
+        & np.isfinite(data["noise_power_watts"])
+        & (data["noise_power_watts"] > 0)
+        & np.isfinite(data["v3_mean_volts"])
+        & np.isfinite(data["abs_v3_mv"])
+        & (data["abs_v3_mv"] <= max_abs_v3_mv)
     )
 
-    df = df.loc[valid].copy()
+    data = data.loc[valid].copy()
+    excluded_rows = original_rows - len(data)
 
-    # Recalculate |V3| from signed V3 rather than trusting the CSV.
-    df["abs_v3_mean_volts"] = np.abs(
-        df["v3_mean_volts"]
-    )
-
-    # Chronological order.
-    if "global_pair_number" in df.columns:
-        df = df.sort_values(
-            "global_pair_number"
+    if data.empty:
+        raise ValueError(
+            "No valid observations remain inside the requested "
+            "near-zero range."
         )
 
-    return df.reset_index(drop=True)
+    data["long_acquisition_number"] = (
+        data["long_acquisition_number"].astype(int)
+    )
+
+    return data, original_rows, excluded_rows
 
 
 # =====================================================================
-# UNIT CONVERSIONS
+# ACQUISITION-LEVEL ESTIMATE
 # =====================================================================
 
-def watts_to_dbm(watts: float) -> float:
+def calculate_acquisition_means(
+    data: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Average subwindow powers within each long acquisition.
 
-    if (
-        math.isfinite(watts)
-        and watts > 0
-    ):
-        return 10.0 * math.log10(
-            watts / 1e-3
+    Each resulting row represents one oscilloscope acquisition and
+    receives equal weight in the final estimate.
+    """
+    acquisition_means = (
+        data.groupby(
+            "long_acquisition_number",
+            as_index=False,
         )
-
-    return math.nan
-
-
-def mean_noise(df: pd.DataFrame) -> tuple[float, float]:
-
-    mean_watts = float(
-        df["noise_power_watts"].mean()
+        .agg(
+            mean_noise_watts=(
+                "noise_power_watts",
+                "mean",
+            ),
+            mean_v3_mv=(
+                "v3_mean_volts",
+                lambda values: float(np.mean(values) * 1e3),
+            ),
+            mean_abs_v3_mv=(
+                "abs_v3_mv",
+                "mean",
+            ),
+            observations=(
+                "noise_power_watts",
+                "size",
+            ),
+        )
     )
 
-    mean_dbm = watts_to_dbm(
-        mean_watts
-    )
-
-    return mean_watts, mean_dbm
+    return acquisition_means
 
 
-# =====================================================================
-# BOOTSTRAP
-# =====================================================================
-
-def bootstrap_mean_dbm(
-    df: pd.DataFrame,
-    repetitions: int = BOOTSTRAP_REPETITIONS,
+def estimate_zero_noise(
+    acquisition_means: pd.DataFrame,
 ) -> tuple[float, float]:
+    """
+    Estimate noise at V3 = 0 under the flat-near-zero assumption.
 
-    values = df["noise_power_watts"].to_numpy(
-        dtype=float
+    Returns the equal-acquisition mean in watts and dBm.
+    """
+    mean_watts = float(
+        acquisition_means["mean_noise_watts"].mean()
     )
 
-    if len(values) < 2:
-        value = watts_to_dbm(
-            float(values[0])
-        )
+    return mean_watts, watts_to_dbm(mean_watts)
 
-        return value, value
 
-    rng = np.random.default_rng(
-        RANDOM_SEED
-    )
+# =====================================================================
+# CLUSTER BOOTSTRAP
+# =====================================================================
 
-    means = np.empty(
+def bootstrap_acquisition_mean(
+    acquisition_means: pd.DataFrame,
+    repetitions: int,
+    confidence_level: float,
+    random_seed: int,
+) -> dict[str, float]:
+    """
+    Bootstrap complete long acquisitions.
+
+    Since the input contains one mean per long acquisition, resampling
+    these rows is equivalent to resampling acquisition clusters while
+    retaining equal acquisition weighting.
+    """
+    values = acquisition_means[
+        "mean_noise_watts"
+    ].to_numpy(dtype=float)
+
+    number_of_acquisitions = len(values)
+
+    if number_of_acquisitions < 2:
+        point_watts = float(values[0])
+        point_dbm = watts_to_dbm(point_watts)
+
+        return {
+            "low_watts": point_watts,
+            "high_watts": point_watts,
+            "low_dbm": point_dbm,
+            "high_dbm": point_dbm,
+        }
+
+    rng = np.random.default_rng(random_seed)
+
+    bootstrap_means = np.empty(
         repetitions,
         dtype=float,
     )
 
-    n = len(values)
-
-    for i in range(repetitions):
-
-        sample = rng.choice(
-            values,
-            size=n,
-            replace=True,
+    for repetition in range(repetitions):
+        sampled_indices = rng.integers(
+            low=0,
+            high=number_of_acquisitions,
+            size=number_of_acquisitions,
         )
 
-        means[i] = np.mean(sample)
+        bootstrap_means[repetition] = float(
+            np.mean(values[sampled_indices])
+        )
 
-    dbm_values = 10.0 * np.log10(
-        means / 1e-3
+    alpha = 1.0 - confidence_level
+
+    low_percentile = 100.0 * alpha / 2.0
+    high_percentile = 100.0 * (1.0 - alpha / 2.0)
+
+    low_watts, high_watts = np.percentile(
+        bootstrap_means,
+        [low_percentile, high_percentile],
     )
 
-    return (
-        float(np.percentile(dbm_values, 2.5)),
-        float(np.percentile(dbm_values, 97.5)),
-    )
+    return {
+        "low_watts": float(low_watts),
+        "high_watts": float(high_watts),
+        "low_dbm": watts_to_dbm(float(low_watts)),
+        "high_dbm": watts_to_dbm(float(high_watts)),
+    }
 
 
 # =====================================================================
-# BASIC REPORT
+# OPTIONAL MEASUREMENT METADATA
 # =====================================================================
 
-def print_basic_statistics(df: pd.DataFrame):
+def summarize_optional_measurement_fields(
+    data: pd.DataFrame,
+) -> None:
+    """Report frequency and ENBW metadata when available."""
+    if "enbw_hz" in data.columns:
+        valid_enbw = data.loc[
+            np.isfinite(data["enbw_hz"])
+            & (data["enbw_hz"] > 0),
+            "enbw_hz",
+        ]
 
-    v3_mv = (
-        df["v3_mean_volts"]
-        .to_numpy()
+        if not valid_enbw.empty:
+            print(
+                f"Median ENBW             : "
+                f"{valid_enbw.median() / 1e3:.6f} kHz"
+            )
+            print(
+                f"ENBW range              : "
+                f"{valid_enbw.min() / 1e3:.6f} to "
+                f"{valid_enbw.max() / 1e3:.6f} kHz"
+            )
+
+    if "actual_fft_bin_frequency_hz" in data.columns:
+        valid_frequency = data.loc[
+            np.isfinite(
+                data["actual_fft_bin_frequency_hz"]
+            ),
+            "actual_fft_bin_frequency_hz",
+        ]
+
+        if not valid_frequency.empty:
+            print(
+                f"Median FFT frequency    : "
+                f"{valid_frequency.median() / 1e6:.9f} MHz"
+            )
+
+
+# =====================================================================
+# SINGLE-RUN ANALYSIS
+# =====================================================================
+
+def analyze_run(
+    run_directory: Path,
+    max_abs_v3_mv: float,
+    repetitions: int,
+) -> None:
+    """Estimate near-zero noise for one run."""
+    csv_path = run_directory / "zero_pairs.csv"
+
+    print("\n" + "#" * 72)
+    print(f"ZERO-V3 NOISE ESTIMATE: {run_directory.name}")
+    print("#" * 72)
+    print(f"Input: {csv_path}")
+
+    try:
+        (
+            data,
+            original_rows,
+            excluded_rows,
+        ) = load_zero_data(
+            csv_path=csv_path,
+            max_abs_v3_mv=max_abs_v3_mv,
+        )
+    except (FileNotFoundError, ValueError) as error:
+        print(f"\nUnable to analyze run: {error}")
+        return
+
+    acquisition_means = calculate_acquisition_means(data)
+
+    mean_watts, mean_dbm = estimate_zero_noise(
+        acquisition_means
+    )
+
+    confidence_interval = bootstrap_acquisition_mean(
+        acquisition_means=acquisition_means,
+        repetitions=repetitions,
+        confidence_level=CONFIDENCE_LEVEL,
+        random_seed=RANDOM_SEED,
+    )
+
+    signed_v3_mv = (
+        data["v3_mean_volts"].to_numpy(dtype=float)
         * 1e3
     )
 
-    abs_v3_mv = np.abs(v3_mv)
+    positive_count = int(np.sum(signed_v3_mv > 0))
+    negative_count = int(np.sum(signed_v3_mv < 0))
+    exact_zero_count = int(np.sum(signed_v3_mv == 0))
 
-    mean_watts, mean_dbm = mean_noise(df)
-
-    positive = int(
-        np.sum(v3_mv > 0)
-    )
-
-    negative = int(
-        np.sum(v3_mv < 0)
-    )
-
-    zero = int(
-        np.sum(v3_mv == 0)
-    )
-
-    print("\n--- Overall dataset ---")
-
+    print("\nData summary")
+    print(f"Original CSV rows       : {original_rows}")
+    print(f"Excluded rows           : {excluded_rows}")
+    print(f"Analyzed observations   : {len(data)}")
     print(
-        f"Total observations : {len(df)}"
+        f"Long acquisitions       : "
+        f"{len(acquisition_means)}"
     )
-
     print(
-        f"V3 range           : "
-        f"{np.min(v3_mv):.4f} to "
-        f"{np.max(v3_mv):.4f} mV"
+        f"Observations/acquisition: "
+        f"{acquisition_means['observations'].min()} to "
+        f"{acquisition_means['observations'].max()}"
     )
-
     print(
-        f"|V3| range         : "
-        f"{np.min(abs_v3_mv):.4f} to "
-        f"{np.max(abs_v3_mv):.4f} mV"
+        f"Required V3 range       : "
+        f"|mean(V3)| <= {max_abs_v3_mv:.6f} mV"
     )
-
     print(
-        f"Mean V3            : "
-        f"{np.mean(v3_mv):.6f} mV"
+        f"Observed signed range   : "
+        f"{signed_v3_mv.min():+.6f} to "
+        f"{signed_v3_mv.max():+.6f} mV"
     )
-
     print(
-        f"Mean |V3|          : "
-        f"{np.mean(abs_v3_mv):.6f} mV"
+        f"Mean signed V3          : "
+        f"{signed_v3_mv.mean():+.6f} mV"
     )
-
     print(
-        f"Median |V3|        : "
-        f"{np.median(abs_v3_mv):.6f} mV"
+        f"Mean |V3|              : "
+        f"{np.abs(signed_v3_mv).mean():.6f} mV"
     )
+    print(f"Positive observations   : {positive_count}")
+    print(f"Negative observations   : {negative_count}")
+    print(f"Exact-zero observations : {exact_zero_count}")
 
+    summarize_optional_measurement_fields(data)
+
+    confidence_percent = 100.0 * CONFIDENCE_LEVEL
+
+    print("\nPrimary result")
     print(
-        f"Positive V3        : {positive}"
+        f"Estimated noise at V3=0 : "
+        f"{mean_watts:.12e} W"
     )
-
     print(
-        f"Negative V3        : {negative}"
-    )
-
-    print(
-        f"Zero V3            : {zero}"
-    )
-
-    print(
-        f"Signed sum V3      : "
-        f"{np.sum(v3_mv):.6f} mV"
-    )
-
-    print(
-        f"Mean noise         : "
-        f"{mean_watts:.6e} W"
-    )
-
-    print(
-        f"Mean noise         : "
+        f"Estimated noise at V3=0 : "
         f"{mean_dbm:.6f} dBm"
     )
-
-
-# =====================================================================
-# CONTINUOUS |V3| REGRESSION
-# =====================================================================
-
-def continuous_abs_v3_analysis(df: pd.DataFrame):
-
-    x = (
-        df["abs_v3_mean_volts"]
-        .to_numpy()
-        * 1e3
-    )
-
-    y = df["noise_power_watts"].to_numpy()
-
-    print("\n" + "=" * 70)
-    print("CONTINUOUS |V3| DEPENDENCE")
-    print("=" * 70)
-
-    # Linear regression.
-    result = stats.linregress(
-        x,
-        y,
-    )
-
     print(
-        "\nLinear model:"
-        "\n    noise = a + b|V3|"
+        f"{confidence_percent:.1f}% cluster-bootstrap CI:"
     )
-
     print(
-        f"  slope       : "
-        f"{result.slope:.6e} W/mV"
+        f"  Watts                 : "
+        f"{confidence_interval['low_watts']:.12e} to "
+        f"{confidence_interval['high_watts']:.12e} W"
     )
-
     print(
-        f"  intercept   : "
-        f"{result.intercept:.6e} W"
+        f"  dBm                   : "
+        f"{confidence_interval['low_dbm']:.6f} to "
+        f"{confidence_interval['high_dbm']:.6f} dBm"
     )
 
-    print(
-        f"  R²          : "
-        f"{result.rvalue ** 2:.8f}"
-    )
-
-    print(
-        f"  correlation : "
-        f"{result.rvalue:.8f}"
-    )
-
-    print(
-        f"  p-value     : "
-        f"{result.pvalue:.8f}"
-    )
-
-    # Quadratic regression.
-    X = np.column_stack(
-        [
-            np.ones_like(x),
-            x,
-            x ** 2,
-        ]
-    )
-
-    coefficients, *_ = np.linalg.lstsq(
-        X,
-        y,
-        rcond=None,
-    )
-
-    prediction = X @ coefficients
-
-    ss_res = np.sum(
-        (y - prediction) ** 2
-    )
-
-    ss_tot = np.sum(
-        (y - np.mean(y)) ** 2
-    )
-
-    r2 = (
-        1.0 - ss_res / ss_tot
-        if ss_tot > 0
-        else math.nan
-    )
-
-    print(
-        "\nQuadratic model:"
-        "\n    noise = a + b|V3| + c|V3|²"
-    )
-
-    print(
-        f"  |V3| coefficient  : "
-        f"{coefficients[1]:.6e} W/mV"
-    )
-
-    print(
-        f"  |V3|² coefficient : "
-        f"{coefficients[2]:.6e} W/mV²"
-    )
-
-    print(
-        f"  R²                : "
-        f"{r2:.8f}"
-    )
-
-    # Estimate noise at V3 = 0.
-    estimated_zero_watts = (
-        coefficients[0]
-    )
-
-    estimated_zero_dbm = watts_to_dbm(
-        estimated_zero_watts
-    )
-
-    print(
-        f"\nEstimated noise at |V3| = 0:"
-    )
-
-    print(
-        f"  {estimated_zero_watts:.6e} W"
-    )
-
-    print(
-        f"  {estimated_zero_dbm:.6f} dBm"
-    )
-
-
-# =====================================================================
-# SIGNED V3 ANALYSIS
-# =====================================================================
-
-def signed_v3_analysis(df: pd.DataFrame):
-
-    x = (
-        df["v3_mean_volts"]
-        .to_numpy()
-        * 1e3
-    )
-
-    y = df["noise_power_watts"].to_numpy()
-
-    result = stats.linregress(
-        x,
-        y,
-    )
-
-    print("\n" + "=" * 70)
-    print("SIGNED V3 DEPENDENCE")
-    print("=" * 70)
-
-    print(
-        "\nLinear model:"
-        "\n    noise = a + bV3"
-    )
-
-    print(
-        f"  slope       : "
-        f"{result.slope:.6e} W/mV"
-    )
-
-    print(
-        f"  R²          : "
-        f"{result.rvalue ** 2:.8f}"
-    )
-
-    print(
-        f"  correlation : "
-        f"{result.rvalue:.8f}"
-    )
-
-    print(
-        f"  p-value     : "
-        f"{result.pvalue:.8f}"
-    )
-
-
-# =====================================================================
-# POSITIVE / NEGATIVE COMPARISON
-# =====================================================================
-
-def signed_side_analysis(df: pd.DataFrame):
-
-    positive = df[
-        df["v3_mean_volts"] > 0
-    ]
-
-    negative = df[
-        df["v3_mean_volts"] < 0
-    ]
-
-    print("\n" + "=" * 70)
-    print("POSITIVE / NEGATIVE V3 COMPARISON")
-    print("=" * 70)
-
-    if len(positive) > 0:
-
-        watts, dbm = mean_noise(
-            positive
-        )
-
+    if len(acquisition_means) < 20:
         print(
-            f"\nPositive V3:"
-            f"\n  N           : {len(positive)}"
-            f"\n  Mean |V3|   : "
-            f"{positive['abs_v3_mean_volts'].mean() * 1e3:.6f} mV"
-            f"\n  Mean noise  : "
-            f"{watts:.6e} W"
-            f"\n  Mean noise  : "
-            f"{dbm:.6f} dBm"
-        )
-
-    if len(negative) > 0:
-
-        watts, dbm = mean_noise(
-            negative
-        )
-
-        print(
-            f"\nNegative V3:"
-            f"\n  N           : {len(negative)}"
-            f"\n  Mean |V3|   : "
-            f"{negative['abs_v3_mean_volts'].mean() * 1e3:.6f} mV"
-            f"\n  Mean noise  : "
-            f"{watts:.6e} W"
-            f"\n  Mean noise  : "
-            f"{dbm:.6f} dBm"
-        )
-
-    if len(positive) > 1 and len(negative) > 1:
-
-        p_watts, _ = mean_noise(
-            positive
-        )
-
-        n_watts, _ = mean_noise(
-            negative
-        )
-
-        difference_db = watts_to_dbm(
-            p_watts
-        ) - watts_to_dbm(
-            n_watts
-        )
-
-        print(
-            f"\nPositive - negative:"
-            f"\n  {difference_db:+.6f} dB"
-        )
-
-
-# =====================================================================
-# WINDOW SWEEP
-# =====================================================================
-
-def window_sweep(df: pd.DataFrame):
-
-    print("\n" + "=" * 70)
-    print("|V3| WINDOW SWEEP")
-    print("=" * 70)
-
-    rows = []
-
-    for window_mv in WINDOWS_MV:
-
-        mask = (
-            df["abs_v3_mean_volts"]
-            <= window_mv * 1e-3
-        )
-
-        subset = df.loc[mask]
-
-        n = len(subset)
-
-        if n < MIN_WINDOW_OBSERVATIONS:
-            continue
-
-        mean_watts, mean_dbm = mean_noise(
-            subset
-        )
-
-        ci_low, ci_high = (
-            bootstrap_mean_dbm(
-                subset
-            )
-        )
-
-        rows.append(
-            {
-                "window_mV": window_mv,
-                "n_pairs": n,
-                "mean_abs_v3_mV":
-                    subset[
-                        "abs_v3_mean_volts"
-                    ].mean() * 1e3,
-                "mean_noise_watts":
-                    mean_watts,
-                "mean_noise_dbm":
-                    mean_dbm,
-                "bootstrap_ci_low_dbm":
-                    ci_low,
-                "bootstrap_ci_high_dbm":
-                    ci_high,
-            }
-        )
-
-    result = pd.DataFrame(rows)
-
-    if result.empty:
-        print(
-            "\nNo windows contained enough observations."
-        )
-        return
-
-    print()
-
-    print(
-        result.to_string(
-            index=False,
-            float_format=lambda x:
-                f"{x:.6f}",
-        )
-    )
-
-    # Compare tightest and widest windows.
-    if len(result) >= 2:
-
-        tight = result.iloc[0]
-        wide = result.iloc[-1]
-
-        difference = (
-            tight["mean_noise_dbm"]
-            - wide["mean_noise_dbm"]
-        )
-
-        print(
-            "\nTightest available window:"
-        )
-
-        print(
-            f"  |V3| <= "
-            f"{tight['window_mV']:.3f} mV"
-        )
-
-        print(
-            f"  Mean noise = "
-            f"{tight['mean_noise_dbm']:.6f} dBm"
-        )
-
-        print(
-            "\nWidest window:"
-        )
-
-        print(
-            f"  |V3| <= "
-            f"{wide['window_mV']:.3f} mV"
-        )
-
-        print(
-            f"  Mean noise = "
-            f"{wide['mean_noise_dbm']:.6f} dBm"
-        )
-
-        print(
-            f"\nTight - wide noise difference:"
-            f" {difference:+.6f} dB"
-        )
-
-
-# =====================================================================
-# CHRONOLOGICAL BLOCK ANALYSIS
-# =====================================================================
-
-def chronological_blocks(df: pd.DataFrame):
-
-    print("\n" + "=" * 70)
-    print("CHRONOLOGICAL BLOCK ANALYSIS")
-    print("=" * 70)
-
-    print(
-        f"\nBlock size: {BLOCK_SIZE} observations"
-    )
-
-    rows = []
-
-    n_blocks = math.ceil(
-        len(df) / BLOCK_SIZE
-    )
-
-    for i in range(n_blocks):
-
-        first = (
-            i * BLOCK_SIZE
-        )
-
-        last = min(
-            first + BLOCK_SIZE,
-            len(df),
-        )
-
-        block = df.iloc[
-            first:last
-        ]
-
-        if len(block) == 0:
-            continue
-
-        watts, dbm = mean_noise(
-            block
-        )
-
-        rows.append(
-            {
-                "block": i + 1,
-                "n": len(block),
-                "mean_v3_mV":
-                    block["v3_mean_volts"].mean()
-                    * 1e3,
-                "mean_abs_v3_mV":
-                    block["abs_v3_mean_volts"].mean()
-                    * 1e3,
-                "mean_noise_dbm":
-                    dbm,
-            }
-        )
-
-    result = pd.DataFrame(rows)
-
-    print()
-
-    print(
-        result.to_string(
-            index=False,
-            float_format=lambda x:
-                f"{x:.6f}",
-        )
-    )
-
-    if len(result) >= 3:
-
-        correlation = np.corrcoef(
-            result["mean_abs_v3_mV"],
-            result["mean_noise_dbm"],
-        )[0, 1]
-
-        print(
-            f"\nChronological block "
-            f"correlation(|V3|, noise): "
-            f"{correlation:.6f}"
-        )
-
-
-# =====================================================================
-# FINAL INTERPRETATION
-# =====================================================================
-
-def interpretation(df: pd.DataFrame):
-
-    x = (
-        df["abs_v3_mean_volts"]
-        .to_numpy()
-        * 1e3
-    )
-
-    y = df["noise_power_watts"].to_numpy()
-
-    result = stats.linregress(
-        x,
-        y,
-    )
-
-    r2 = result.rvalue ** 2
-
-    print("\n" + "=" * 70)
-    print("INTERPRETATION")
-    print("=" * 70)
-
-    if result.pvalue < 0.05:
-
-        if result.slope > 0:
-
-            print(
-                "\nThere IS statistically significant evidence "
-                "that noise increases with |V3|."
-            )
-
-            print(
-                "This supports the hypothesis that reducing "
-                "the detector imbalance can reduce the measured noise."
-            )
-
-        else:
-
-            print(
-                "\nThere IS statistically significant evidence "
-                "that noise decreases with |V3|."
-            )
-
-            print(
-                "This is opposite to the expected explanation "
-                "that better balance reduces the measured noise."
-            )
-
-    else:
-
-        print(
-            "\nThere is NO statistically significant linear "
-            "relationship between |V3| and noise."
-        )
-
-        print(
-            "Therefore this run does not provide strong evidence "
-            "that the noise improvement is caused simply by reduced |V3|."
+            "\nCaution: fewer than 20 independent long acquisitions "
+            "were available, so the confidence interval may be unstable."
         )
 
     print(
-        f"\nR² = {r2:.8f}"
-    )
-
-    print(
-        "\nNo positive/negative balancing was performed."
-    )
-
-    print(
-        "No observations were randomly deleted."
-    )
-
-    print(
-        "The natural physical V3 distribution was preserved."
-    )
-
-    print(
-        "\nIMPORTANT:"
-    )
-
-    print(
-        "zero_pairs.csv contains only observations that passed "
-        "the original acquisition threshold. Therefore this analysis "
-        "describes the relationship inside the accepted region; "
-        "it cannot determine behavior outside that region."
-    )
-
-
-# =====================================================================
-# SINGLE RUN
-# =====================================================================
-
-def analyze_run(run_directory: Path):
-
-    csv_path = (
-        run_directory
-        / "zero_pairs.csv"
-    )
-
-    print("\n")
-    print("#" * 70)
-    print(
-        f"RUN ANALYSIS: {run_directory.name}"
-    )
-    print("#" * 70)
-
-    print(
-        f"\nInput CSV:\n  {csv_path}"
-    )
-
-    if not csv_path.exists():
-
-        print(
-            "\nWARNING: zero_pairs.csv does not exist "
-            "for this run."
-        )
-
-        return
-
-    df = load_data(
-        csv_path
-    )
-
-    if len(df) == 0:
-
-        print(
-            "\nNo valid observations."
-        )
-
-        return
-
-    print_basic_statistics(
-        df
-    )
-
-    continuous_abs_v3_analysis(
-        df
-    )
-
-    signed_v3_analysis(
-        df
-    )
-
-    signed_side_analysis(
-        df
-    )
-
-    window_sweep(
-        df
-    )
-
-    chronological_blocks(
-        df
-    )
-
-    interpretation(
-        df
+        "\nInterpretation:"
+        "\n  Under the previously established flat-near-zero assumption,"
+        "\n  this acquisition-weighted linear-power mean estimates the"
+        "\n  measured noise at V3 = 0."
+        "\n  The dBm value applies to the reported measurement ENBW."
     )
 
 
@@ -998,12 +531,11 @@ def analyze_run(run_directory: Path):
 # COMMAND LINE
 # =====================================================================
 
-def parse_arguments():
-
+def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Analyze V3 imbalance and noise "
-            "without modifying the original data."
+            "Estimate noise at V3 = 0 using acquisition-level "
+            "averaging and a cluster bootstrap."
         )
     )
 
@@ -1012,24 +544,39 @@ def parse_arguments():
         type=int,
         default=None,
         help=(
-            "Run number to analyze. "
-            "Defaults to the latest run."
+            "Run number to analyze. Defaults to the latest run."
         ),
     )
 
     parser.add_argument(
         "--all",
         action="store_true",
-        help=(
-            "Analyze every Run N directory."
-        ),
+        help="Analyze every Run N directory separately.",
     )
 
     parser.add_argument(
         "--base",
         default=BASE_DIRECTORY,
+        help="Base directory containing Run N folders.",
+    )
+
+    parser.add_argument(
+        "--max-abs-v3-mv",
+        type=float,
+        default=MAX_ABS_V3_MV,
         help=(
-            "Base directory containing Run N folders."
+            "Maximum accepted absolute mean V3 in mV. "
+            f"Default: {MAX_ABS_V3_MV}"
+        ),
+    )
+
+    parser.add_argument(
+        "--bootstrap-repetitions",
+        type=int,
+        default=BOOTSTRAP_REPETITIONS,
+        help=(
+            "Number of acquisition-level bootstrap repetitions. "
+            f"Default: {BOOTSTRAP_REPETITIONS}"
         ),
     )
 
@@ -1040,9 +587,18 @@ def parse_arguments():
 # MAIN
 # =====================================================================
 
-def main():
-
+def main() -> None:
     args = parse_arguments()
+
+    if args.max_abs_v3_mv <= 0:
+        raise ValueError(
+            "--max-abs-v3-mv must be greater than zero."
+        )
+
+    if args.bootstrap_repetitions < 100:
+        raise ValueError(
+            "--bootstrap-repetitions must be at least 100."
+        )
 
     base_directory = (
         Path(args.base)
@@ -1051,34 +607,22 @@ def main():
     )
 
     if args.all:
-
-        runs = find_run_directories(
+        run_directories = find_run_directories(
             base_directory
         )
-
-        print(
-            f"Found {len(runs)} run(s): "
-            + ", ".join(
-                path.name
-                for path in runs
-            )
-        )
-
-        for run in runs:
-
-            analyze_run(
-                run
-            )
-
     else:
+        run_directories = [
+            find_target_run(
+                base_directory,
+                args.run,
+            )
+        ]
 
-        run = find_target_run(
-            base_directory,
-            args.run,
-        )
-
+    for run_directory in run_directories:
         analyze_run(
-            run
+            run_directory=run_directory,
+            max_abs_v3_mv=args.max_abs_v3_mv,
+            repetitions=args.bootstrap_repetitions,
         )
 
 

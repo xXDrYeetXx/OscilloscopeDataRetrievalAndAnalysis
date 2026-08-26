@@ -24,8 +24,6 @@ The original approach used the oscilloscope's built-in GUI to manually monitor C
 
 \- A single marker value was recorded per condition, providing no statistical uncertainty.
 
-\- Averaging was performed implicitly in dBm display units rather than in linear watts, which is physically incorrect for noise power averaging.
-
 
 
 \### Proposed Automated System

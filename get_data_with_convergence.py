@@ -1319,7 +1319,7 @@ def main() -> None:
             "beam_power_mw":             beam_power_mw,
             "squeezing_device_present":  squeezing_device_present,
             "additional_notes":          additional_notes,
-            "final_mean_dbm":            final_mean_dbm,
+            "final_mean_watts":          final_mean_watts,
         }
         summary_json.write_text(
             json.dumps(summary, indent=2, allow_nan=True),

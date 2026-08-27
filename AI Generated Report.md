@@ -1,33 +1,40 @@
 # Technical Report: Automated Noise Acquisition and Squeezing Analysis
 
+**Institution:** University of Florida
+
+---
+
 ## 1. Purpose
 
-This project automates noise measurements for a quantum-optics experiment using a Thorlabs PDB230C balanced photodetector and a Keysight DSA91304A oscilloscope. It replaces manual oscilloscope readings with synchronized waveform acquisition, spectral analysis, statistical convergence testing, linear calibration, and squeezing calculations with propagated uncertainty.
+This project automates noise measurements for a quantum-optics squeezing experiment. It replaces manual oscilloscope readings with a synchronized, automated pipeline covering waveform acquisition, spectral analysis, statistical convergence, linear calibration, and squeezing calculation with propagated uncertainty.
 
-The oscilloscope measures the balanced detector difference output:
+## 2. Physical setup
 
-$$
-V_3(t)=V_1(t)-V_2(t).
-$$
+The experiment uses a Thorlabs PDB230C balanced amplified photodetector connected to a Keysight DSA91304A 13 GHz oscilloscope over LAN. The balanced detector produces two photocurrent outputs from two input optical beams. Channel 3 of the oscilloscope receives the hardware difference signal produced by the detector:
 
-The primary result is obtained by comparing the beam-power-dependent noise slopes measured with squeezed and unsqueezed light under otherwise identical experimental conditions.
+```math
+V_3(t) = V_1(t) - V_2(t).
+```
 
-## 2. Software components
+When the two input beams carry equal optical power, the detector is balanced and $V_3$ carries only noise. The power spectral density of $V_3$ near 10 MHz is used as the noise observable.
 
-The analysis consists of three Python programs:
+Squeezing is measured by comparing the power-dependent noise slope of squeezed light against an unsqueezed shot-noise reference collected under otherwise identical conditions. The result is independent of common multiplicative factors such as detector gain and measurement bandwidth, provided both datasets use the same acquisition and analysis settings.
 
-- `get_data_with_convergence.py` acquires and processes oscilloscope waveforms.
-- `analyze_runs.py` fits noise power as a function of optical beam power.
-- `calculate_squeezing.py` compares squeezed and unsqueezed calibration slopes.
+## 3. Software components
 
-## 3. Data acquisition
+| Program | Purpose |
+|---|---|
+| `get_data_with_convergence.py` | Acquires waveforms and computes converged noise power |
+| `analyze_runs.py` | Fits noise power as a function of optical beam power |
+| `calculate_squeezing.py` | Computes squeezing from the ratio of two calibration slopes |
 
-The oscilloscope is controlled over LAN using PyVISA. Channel 3 is transferred as signed, little-endian, 16-bit binary waveform data. Raw instrument values are converted to voltage using the waveform scaling parameters returned by the oscilloscope:
+## 4. Data acquisition
 
-$$
-V=(Y_{\mathrm{raw}}-Y_{\mathrm{reference}})
-Y_{\mathrm{increment}}+Y_{\mathrm{origin}}.
-$$
+The oscilloscope is controlled over LAN using PyVISA. Channel 3 is transferred as signed, little-endian, 16-bit binary waveform data and converted to voltage using the waveform scaling parameters returned by the oscilloscope:
+
+```math
+V = (Y_{\mathrm{raw}} - Y_{\mathrm{reference}})\, Y_{\mathrm{increment}} + Y_{\mathrm{origin}}.
+```
 
 The configured acquisition parameters are:
 
@@ -43,390 +50,216 @@ The configured acquisition parameters are:
 | Vertical offset | 0 V |
 | Balance threshold | 5 mV |
 
-The actual sample interval and sample rate are obtained from the oscilloscope for every waveform. The analysis uses the measured values rather than assuming that the requested sample rate was achieved exactly.
+The actual sample interval and rate are read back from the oscilloscope preamble for every acquisition. All spectral calculations use measured rather than requested values.
 
-## 4. Balance selection
+## 5. Balance selection
 
-Each long waveform is divided into non-overlapping 1.5 µs subwindows. For each subwindow, the mean detector-difference voltage is calculated:
+Each long waveform is divided into non-overlapping 1.5 µs subwindows. For each subwindow the mean detector-difference voltage is calculated:
 
-$$
-\overline{V_3}=\frac{1}{N}\sum_{n=0}^{N-1}V_3[n].
-$$
+```math
+\overline{V_3} = \frac{1}{N}\sum_{n=0}^{N-1} V_3[n].
+```
 
 A subwindow is accepted when:
 
-$$
-\left|\overline{V_3}\right|\leq 5\ \mathrm{mV}.
-$$
+```math
+\left|\overline{V_3}\right| \leq 5\ \mathrm{mV}.
+```
 
-The balance metric and spectral noise estimate are calculated from the same samples. Each accepted result therefore associates the detector balance and measured noise with the same physical time interval.
+The balance metric and spectral noise estimate are derived from the same samples, so each accepted result associates the detector balance with the measured noise at the same physical moment.
 
-The mean voltage is used as the balance criterion instead of the total RMS voltage so that the selection criterion does not directly select observations according to their measured noise magnitude.
+The mean voltage is used as the balance criterion rather than the total RMS voltage so that the selection does not directly depend on the noise being measured.
 
-## 5. Spectral analysis
+## 6. Spectral analysis
 
-Each accepted subwindow is mean-detrended and multiplied by a periodic Hann window. The program evaluates the discrete Fourier coefficient at the Fourier bin nearest 10 MHz.
+Each accepted subwindow is mean-detrended and multiplied by a periodic Hann window. A single Fourier coefficient is evaluated at the bin nearest 10 MHz.
 
-For an interior positive-frequency bin, the one-sided voltage power spectral density is calculated as:
+The one-sided voltage power spectral density at that bin is:
 
-$$
-S_{VV}(f_k)=
-\frac{2|X_k|^2}
-{f_s\sum_n w_n^2},
-$$
+```math
+S_{VV}(f_k) = \frac{2\left|X_k\right|^2}{f_s \sum_n w_n^2},
+```
 
-where:
+where $X_k$ is the Hann-windowed Fourier coefficient, $f_s$ is the measured sample rate, and $w_n$ is the Hann window.
 
-- $X_k$ is the Hann-windowed Fourier coefficient,
-- $f_s$ is the measured sample rate,
-- $w_n$ is the Hann window.
+The voltage PSD is converted to power PSD using the reference impedance:
 
-The voltage PSD is converted to power PSD using the configured reference impedance:
+```math
+S_{PP}(f_k) = \frac{S_{VV}(f_k)}{R},\quad R = 50\ \Omega.
+```
 
-$$
-S_{PP}(f_k)=\frac{S_{VV}(f_k)}{R},
-$$
+The Hann equivalent noise bandwidth is:
 
-where $R=50\ \Omega$.
+```math
+\mathrm{ENBW} = f_s \frac{\sum_n w_n^2}{\left(\sum_n w_n\right)^2}.
+```
 
-The equivalent noise bandwidth of the Hann window is:
+The noise power for the selected bin is:
 
-$$
-\mathrm{ENBW}
-=
-f_s
-\frac{\sum_n w_n^2}
-{\left(\sum_n w_n\right)^2}.
-$$
+```math
+P_{\mathrm{noise}} = S_{PP}(f_k)\,\mathrm{ENBW}.
+```
 
-The selected-bin noise power is then:
+For a 1.5 µs periodic Hann window at 1 GSa/s, the nominal ENBW is approximately 1 MHz. The program records the actual ENBW, selected Fourier frequency, and frequency error for every acquisition.
 
-$$
-P_{\mathrm{noise}}
-=
-S_{PP}(f_k)\,\mathrm{ENBW}.
-$$
+All averages are performed in linear watts. Conversion to dBm occurs only after averaging:
 
-For a 1.5 µs periodic Hann window, the nominal ENBW is approximately 1 MHz. The program records the actual ENBW, Fourier frequency, and frequency error calculated from the measured sample rate.
+```math
+P_{\mathrm{dBm}} = 10\log_{10}\!\left(\frac{P_{\mathrm{W}}}{1\ \mathrm{mW}}\right).
+```
 
-All averages are calculated in linear watts. Conversion to dBm occurs only after averaging:
+## 7. Acquisition-level statistics
 
-$$
-P_{\mathrm{dBm}}
-=
-10\log_{10}
-\left(
-\frac{P_{\mathrm{W}}}{1\ \mathrm{mW}}
-\right).
-$$
+Subwindows from the same long acquisition may be correlated due to detector dynamics, laser noise, and mechanical drift. Complete acquisitions are therefore treated as statistical clusters.
 
-## 6. Acquisition-level statistics
+The pooled mean is:
 
-Subwindows from the same long oscilloscope acquisition may be correlated. The program therefore groups accepted subwindows according to their parent long acquisition.
+```math
+\overline{P} = \frac{\sum_i \sum_j P_{ij}}{\sum_i n_i},
+```
 
-The overall reported mean is the pooled arithmetic mean of all accepted subwindow powers:
+where $i$ identifies a long acquisition and $j$ identifies an accepted subwindow within it.
 
-$$
-\overline{P}
-=
-\frac{\sum_i\sum_j P_{ij}}
-{\sum_i n_i},
-$$
+Uncertainty is estimated with a cluster bootstrap in which complete acquisitions are resampled with replacement, preserving within-acquisition dependence.
 
-where $i$ identifies a long acquisition and $j$ identifies an accepted subwindow within that acquisition.
+## 8. Convergence criteria
 
-Uncertainty is estimated with a cluster bootstrap. Complete long-acquisition clusters are sampled with replacement so that dependence among subwindows from the same acquisition is preserved.
+Convergence requires both a precision condition and a stability condition.
 
-## 7. Convergence criteria
+### 8.1 Precision condition
 
-Convergence requires both a precision condition and a recent-stability condition.
+The cluster-bootstrap 95% confidence interval relative half-width must satisfy:
 
-### 7.1 Precision condition
+```math
+h_{\mathrm{rel}} = \frac{P_{\mathrm{high}} - P_{\mathrm{low}}}{2\,\overline{P}} \leq 0.05.
+```
 
-A cluster-bootstrap 95% confidence interval is calculated for the pooled mean. The relative confidence-interval half-width is:
+### 8.2 Stability condition
 
-$$
-h_{\mathrm{rel}}
-=
-\frac{P_{\mathrm{high}}-P_{\mathrm{low}}}
-{2\overline{P}}.
-$$
+Two adjacent, non-overlapping blocks of qualifying acquisitions are compared. The relative change must satisfy:
 
-The precision condition passes when:
+```math
+\Delta_{\mathrm{rel}} = \frac{\left|\overline{P}_{\mathrm{recent}} - \overline{P}_{\mathrm{preceding}}\right|}{\overline{P}_{\mathrm{preceding}}} \leq 0.05.
+```
 
-$$
-h_{\mathrm{rel}}\leq 0.05.
-$$
+### 8.3 Convergence configuration
 
-### 7.2 Stability condition
+| Parameter | Value |
+|---|---:|
+| Minimum qualifying acquisitions | 100 |
+| Check interval | every 20 acquisitions |
+| Stability block size | 50 acquisitions |
+| Precision target | 5% relative CI half-width |
+| Stability tolerance | 5% |
+| Required consecutive passes | 3 |
 
-The pooled means of two adjacent, non-overlapping blocks of qualifying acquisitions are compared:
+The termination reason, number of attempted and qualifying acquisitions, accepted subwindows, final confidence interval, and convergence streak are saved with every result.
 
-$$
-\Delta_{\mathrm{rel}}
-=
-\frac{
-\left|
-\overline{P}_{\mathrm{recent}}
--
-\overline{P}_{\mathrm{preceding}}
-\right|
-}
-{\overline{P}_{\mathrm{preceding}}}.
-$$
+## 9. Shot-noise calibration
 
-The stability condition passes when:
+Multiple runs at different optical powers are fitted to the linear model:
 
-$$
-\Delta_{\mathrm{rel}}\leq 0.05.
-$$
+```math
+N(P) = kP + N_{\mathrm{dark}},
+```
 
-The current convergence configuration requires:
+where $P$ is optical beam power, $k$ is the beam-power-dependent noise slope, and $N_{\mathrm{dark}}$ is the fitted power-independent intercept.
 
-- at least 100 qualifying acquisitions,
-- convergence checks every 20 new qualifying acquisitions,
-- two 50-acquisition stability blocks,
-- a 5% relative confidence-interval half-width,
-- a 5% recent-block stability tolerance,
-- three consecutive successful checks.
+Parameters are estimated by ordinary least squares:
 
-These are predefined engineering convergence criteria. The final number of attempted acquisitions, qualifying acquisitions, accepted subwindows, confidence interval, and termination reason are saved with each result.
-
-## 8. Shot-noise calibration
-
-Each completed run records the optical beam power and final mean noise power. Multiple runs at different optical powers are fitted to:
-
-$$
-N(P)=kP+N_{\mathrm{dark}},
-$$
-
-where:
-
-- $P$ is optical beam power,
-- $k$ is the beam-power-dependent noise slope,
-- $N_{\mathrm{dark}}$ is the fitted power-independent intercept.
-
-The parameters are estimated by ordinary least squares. The model matrix is:
-
-$$
-X=
-\begin{bmatrix}
-P_1 & 1\\
-P_2 & 1\\
-\vdots & \vdots\\
-P_n & 1
-\end{bmatrix}.
-$$
-
-The parameter estimate is:
-
-$$
-\hat{\beta}
-=
-(X^\mathsf{T}X)^{-1}X^\mathsf{T}y,
-$$
-
-where:
-
-$$
-\hat{\beta}
-=
-\begin{bmatrix}
-k\\
-N_{\mathrm{dark}}
-\end{bmatrix}.
-$$
-
-The residual variance is estimated using $n-2$ degrees of freedom:
-
-$$
-\hat{\sigma}^2
-=
-\frac{\sum_i(y_i-\hat{y}_i)^2}{n-2}.
-$$
+```math
+\hat{\beta} = (X^\mathsf{T}X)^{-1}X^\mathsf{T}y,\quad
+\hat{\beta} = \begin{bmatrix}k\\N_{\mathrm{dark}}\end{bmatrix}.
+```
 
 The parameter covariance matrix is:
 
-$$
-\operatorname{Cov}(\hat{\beta})
-=
-\hat{\sigma}^2(X^\mathsf{T}X)^{-1}.
-$$
+```math
+\operatorname{Cov}(\hat{\beta}) = \hat{\sigma}^2(X^\mathsf{T}X)^{-1},
+```
 
-The square roots of the covariance-matrix diagonal elements provide the standard errors of the slope and intercept.
+where the residual variance uses $n - 2$ degrees of freedom. Standard errors are the square roots of the diagonal elements.
 
-The program also reports:
+The program also reports $R^2$, Pearson $r$, a two-tailed $t$-test p-value for the slope, the maximum absolute residual, and a residual plot.
 
-- Pearson correlation coefficient $r$,
-- coefficient of determination $R^2$,
-- a two-tailed $t$-test p-value for the slope,
-- maximum absolute residual,
-- a residual plot.
+The fitted slope $k$ and its standard error are passed to the squeezing calculation.
 
-The fitted slope and its standard error are passed to the squeezing calculation.
+## 10. Squeezing calculation
 
-## 9. Squeezing calculation
-
-Independent calibration curves are obtained for squeezed and unsqueezed light. Their slopes are denoted by $k_{\mathrm{sq}}$ and $k_{\mathrm{unsq}}$.
+Independent calibration curves are obtained for squeezed and unsqueezed light with slopes $k_{\mathrm{sq}}$ and $k_{\mathrm{unsq}}$.
 
 The normalized measured noise variance is:
 
-$$
-R=
-\frac{k_{\mathrm{sq}}}
-{k_{\mathrm{unsq}}}.
-$$
+```math
+R = \frac{k_{\mathrm{sq}}}{k_{\mathrm{unsq}}}.
+```
 
 The measured noise level relative to shot noise is:
 
-$$
-L_{\mathrm{dB}}
-=
-10\log_{10}(R).
-$$
-
-The interpretation is:
-
-- $L_{\mathrm{dB}}<0$: squeezing,
-- $L_{\mathrm{dB}}=0$: equal to the unsqueezed reference,
-- $L_{\mathrm{dB}}>0$: noise above the unsqueezed reference.
+```math
+L_{\mathrm{dB}} = 10\log_{10}(R).
+```
 
 The percentage reduction below shot noise is:
 
-$$
-Q=(1-R)\times100\%.
-$$
+```math
+Q = (1 - R) \times 100\%.
+```
 
-Because the result is based on a slope ratio, common multiplicative factors such as ENBW and impedance conversion cancel when squeezed and unsqueezed datasets are acquired and processed using identical settings.
+Because the result uses a slope ratio, common multiplicative factors cancel when both datasets are acquired and analyzed with identical settings.
 
-## 10. Squeezing uncertainty
+## 11. Squeezing uncertainty
 
-The standard errors of the two slopes are propagated with a first-order delta method. Assuming statistically independent slope estimates:
+Slope standard errors are propagated by the first-order delta method, assuming independent slope estimates:
 
-$$
-\left(\frac{\sigma_R}{R}\right)^2
-=
-\left(
-\frac{\sigma_{\mathrm{sq}}}{k_{\mathrm{sq}}}
-\right)^2
-+
-\left(
-\frac{\sigma_{\mathrm{unsq}}}{k_{\mathrm{unsq}}}
-\right)^2.
-$$
-
-Therefore:
-
-$$
-\sigma_R
-=
-R
-\sqrt{
-\left(
-\frac{\sigma_{\mathrm{sq}}}{k_{\mathrm{sq}}}
-\right)^2
-+
-\left(
-\frac{\sigma_{\mathrm{unsq}}}{k_{\mathrm{unsq}}}
-\right)^2
-}.
-$$
+```math
+\left(\frac{\sigma_R}{R}\right)^2 =
+\left(\frac{\sigma_{\mathrm{sq}}}{k_{\mathrm{sq}}}\right)^2 +
+\left(\frac{\sigma_{\mathrm{unsq}}}{k_{\mathrm{unsq}}}\right)^2.
+```
 
 The propagated dB uncertainty is:
 
-$$
-\sigma_{\mathrm{dB}}
-=
-\frac{10}{\ln(10)}
-\frac{\sigma_R}{R}.
-$$
+```math
+\sigma_{\mathrm{dB}} = \frac{10}{\ln(10)}\,\frac{\sigma_R}{R}.
+```
 
-Unless otherwise stated, reported `±` values represent one standard error, approximately corresponding to a 68% interval when the linear approximation and normality assumptions are appropriate.
+Reported $\pm$ values represent one standard error. The one-standard-error percentage range is evaluated at $R \pm \sigma_R$.
 
-The one-standard-error percentage range is calculated from:
+## 12. Output files
 
-$$
-Q_{\mathrm{low}}
-=
-\left[1-(R+\sigma_R)\right]100\%
-$$
+Each run is stored in a numbered directory under `v3_converged_noise_data`.
 
-and:
+| File | Contents |
+|---|---|
+| `zero_pairs.csv` | Accepted subwindow measurements, balance values, spectral results, running means |
+| `convergence_history.csv` | Every convergence check with precision and stability results |
+| `converged_result.json` | Full final result, metadata, and acquisition configuration |
+| `summary.json` | Abbreviated experimental parameters and final mean noise power |
 
-$$
-Q_{\mathrm{high}}
-=
-\left[1-(R-\sigma_R)\right]100\%.
-$$
-
-## 11. Output files
-
-Each acquisition run is stored in a separate numbered directory.
-
-### `zero_pairs.csv`
-
-Contains one row for each accepted subwindow, including:
-
-- parent acquisition number,
-- subwindow number,
-- timestamp,
-- sample rate,
-- mean detector-difference voltage,
-- PSD,
-- noise power in watts and dBm,
-- selected Fourier frequency,
-- ENBW,
-- running mean.
-
-### `convergence_history.csv`
-
-Contains every convergence check, including:
-
-- pooled mean,
-- bootstrap confidence interval,
-- relative interval half-width,
-- adjacent-block means,
-- block-relative change,
-- pass/fail results,
-- convergence streak.
-
-### `converged_result.json`
-
-Contains the complete final result and acquisition metadata.
-
-### `summary.json`
-
-Contains a reduced summary of the experimental parameters and final mean noise power.
-
-## 12. Assumptions and limitations
-
-The analysis relies on the following assumptions:
+## 13. Assumptions and limitations
 
 1. Squeezed and unsqueezed datasets use identical acquisition and analysis settings.
 2. The 50 Ω conversion represents the actual electrical measurement configuration.
-3. The fitted noise response is approximately linear over the selected optical-power range.
-4. The OLS residuals are approximately independent and have constant variance.
-5. Squeezed and unsqueezed slope estimates are independent.
+3. The noise response is approximately linear over the selected optical-power range.
+4. OLS residuals are approximately independent with constant variance.
+5. Squeezed and unsqueezed slope estimates are statistically independent.
 6. First-order uncertainty propagation is adequate for the measured relative uncertainties.
-7. The balance-selection threshold does not introduce a material difference between squeezed and unsqueezed datasets.
+7. The balance-selection threshold does not introduce a material difference between the two datasets.
 
-The directly reported result is observed squeezing at the measurement system. It is not corrected for optical loss or imperfect detection efficiency.
+The reported result is directly observed squeezing at the measurement system. No correction for optical loss or detection efficiency is currently applied. If source squeezing is inferred, the correction method, detection efficiency, and its uncertainty must be reported separately.
 
-If loss-corrected source squeezing is reported, the correction method, total detection efficiency, and uncertainty in that efficiency must be included separately.
-
-## 13. Reproducibility requirements
+## 14. Reproducibility requirements
 
 For final experimental results, preserve:
 
-- the complete run directories,
-- the exact run numbers used in each fit,
-- the source-code version or Git commit,
+- complete run directories,
+- exact run selections used in each fit,
+- source-code version or Git commit,
 - Python and dependency versions,
 - oscilloscope model and firmware,
 - detector gain and bandwidth settings,
-- oscilloscope input impedance, coupling, and bandwidth settings,
-- optical-power calibration information,
-- all acquisition and convergence constants,
-- whether the squeezing device was present for each run.
-
-These records allow the acquisition, calibration, and squeezing calculation to be independently reconstructed.
+- oscilloscope input impedance, coupling, and bandwidth,
+- optical-power calibration,
+- all acquisition and convergence configuration,
+- experimental notes including whether the squeezing device was present.

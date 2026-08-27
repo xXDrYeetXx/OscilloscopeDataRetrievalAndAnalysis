@@ -53,7 +53,7 @@ def parse_run_input(input_str: str) -> list[int]:
 
 
 def extract_data_from_runs(
-    run_numbers: list[int], base_folder: str = "."
+    run_numbers: list[int], base_folder: str = "v3_converged_noise_data"
 ) -> pd.DataFrame:
     """Iterates through specified Run directories and extracts beam power (mW)
     and raw linear noise power (Watts).

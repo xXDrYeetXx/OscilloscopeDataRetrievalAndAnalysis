@@ -58,7 +58,7 @@ Changes (v3)
 Change (v4)
 -----------
 - Added verification that the vertical scale is set to the expected
-  value (10 mV/div) and printed to console for user confirmation.
+  value (10 mV/div) and printed to console for user confirmation.
 """
 
 from __future__ import annotations
@@ -268,6 +268,21 @@ def prompt_float(prompt: str) -> float:
             return float(input(prompt))
         except ValueError:
             print("  Please enter a numeric value.")
+
+
+def prompt_squeezing_device_present(prompt: str) -> str:
+    """Prompt for y/n/blank and return True, False, or Unknown."""
+    while True:
+        response = input(prompt).strip().lower()
+
+        if response == "y":
+            return "True"
+        if response == "n":
+            return "False"
+        if response == "":
+            return "Unknown"
+
+        print("  Please enter y, n, or press Enter for Unknown.")
 
 
 # =====================================================================
@@ -795,6 +810,10 @@ def main() -> None:
         beam_power_mw = prompt_float(
             "  Beam power (mW)             : "
         )
+        squeezing_device_present = prompt_squeezing_device_present(
+            "  Is the squeezing device present? [y/n] : "
+        )
+        additional_notes = input("  Additional Notes: ")
         print()
 
         print("Press Ctrl+C to stop.")
@@ -820,7 +839,7 @@ def main() -> None:
             try:
                 long_acquisition_number += 1
                 # --------------------------------------------------------------
-                # ENSURE THE VERTICAL SCALE IS LOCKED TO 10 mV/div EVERY LOOP
+                # ENSURE THE VERTICAL SCALE IS LOCKED TO 10 mV/div EVERY LOOP
                 # --------------------------------------------------------------
                 # 1. Make sure the channel display is ON (required for scale changes)
                 scope.write(f":CHANnel{CHANNEL}:DISPlay ON")
@@ -832,8 +851,8 @@ def main() -> None:
                 scope.query("*OPC?")
 
                 # 3. Set the scale (in volts/div – the SCPI unit expects volts)
-                scope.write(f":CHANnel{CHANNEL}:SCALe {CHANNEL_VERTICAL_SCALE_VOLTS}")  # 10 mV = 0.01 V
-                scope.write(f":CHANnel{CHANNEL}:OFFSet {CHANNEL_VERTICAL_OFFSET_VOLTS}")  # normally 0 V
+                scope.write(f":CHANnel{CHANNEL}:SCALe {CHANNEL_VERTICAL_SCALE_VOLTS}")  # 10 mV = 0.01 V
+                scope.write(f":CHANnel{CHANNEL}:OFFSet {CHANNEL_VERTICAL_OFFSET_VOLTS}")  # normally 0 V
                 scope.query("*OPC?")
 
                 # --------------------------------------------------------------
@@ -1213,6 +1232,8 @@ def main() -> None:
             "instrument":                     instrument_id,
             "laser_amplifier_amps":           laser_amplifier_amps,
             "beam_power_mw":                  beam_power_mw,
+            "squeezing_device_present":       squeezing_device_present,
+            "additional_notes":               additional_notes,
             "termination_reason":             termination_reason,
             "converged":                      converged,
             "started_utc":                    started_utc,
@@ -1294,9 +1315,11 @@ def main() -> None:
         # SUMMARY FILE
         # ------------------------------------------------------------------
         summary = {
-            "laser_amplifier_amps": laser_amplifier_amps,
-            "beam_power_mw":        beam_power_mw,
-            "final_mean_dbm":       final_mean_dbm,
+            "laser_amplifier_amps":      laser_amplifier_amps,
+            "beam_power_mw":             beam_power_mw,
+            "squeezing_device_present":  squeezing_device_present,
+            "additional_notes":          additional_notes,
+            "final_mean_dbm":            final_mean_dbm,
         }
         summary_json.write_text(
             json.dumps(summary, indent=2, allow_nan=True),

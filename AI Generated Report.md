@@ -1,7 +1,5 @@
 # Technical Report: Automated Noise Acquisition and Squeezing Analysis
 
----
-
 ## 1. Purpose
 
 This project automates noise measurements for a quantum-optics squeezing experiment. It replaces manual oscilloscope readings with a synchronized, automated pipeline covering waveform acquisition, spectral analysis, statistical convergence, linear calibration, and squeezing calculation with propagated uncertainty.

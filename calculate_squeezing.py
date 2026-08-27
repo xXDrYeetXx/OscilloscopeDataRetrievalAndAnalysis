@@ -113,10 +113,11 @@ print("=" * 50)
 print(f"  Noise ratio  R = {measured_noise_ratio:.6f} ± {sigma_ratio:.6f}")
 print(f"  Squeezing      = {measured_level_db:.4f} ± {sigma_db:.4f} dB")
 print("=" * 50)
-
+print("")
+print("Uncertainty: 1σ")
 if measured_level_db < 0:
     print(
-        f"\nThis is a {abs(measured_level_db):.4f} ± {sigma_db:.4f} dB squeezing reduction "
+        f"This is a {abs(measured_level_db):.4f} ± {sigma_db:.4f} dB squeezing reduction "
         f"({reduction_low:.2f}% to {reduction_high:.2f}% lower noise than shot noise)."
     )
 elif measured_level_db > 0:

@@ -1,3 +1,46 @@
+"""
+analyze_runs.py
+===============
+Loads converged noise measurements from multiple acquisition runs and
+fits a linear shot-noise calibration curve: noise power vs. beam power.
+
+STATISTICAL METHODS
+-------------------
+1. OLS REGRESSION
+   Fits the model N = k * P + N_dark using ordinary least squares via
+   the normal equations. Standard errors on both k and N_dark are
+   derived from the full 2x2 parameter covariance matrix:
+
+       Cov(β) = σ² (XᵀX)⁻¹
+
+   where σ² is the unbiased residual variance (n - 2 degrees of
+   freedom). The slope k represents the detector's noise
+   responsiveness (nW/mW) and is the quantity passed to
+   calculate_squeezing.py. N_dark is the power-independent dark
+   noise floor.
+
+2. GOODNESS OF FIT
+   Reports R², Pearson r, a two-tailed t-test p-value for the slope
+   (H₀: k = 0), and the maximum absolute residual.
+
+3. DERIVED FORMULAS
+   The fitted parameters are used to express total noise and shot
+   noise as explicit functions of beam power P, in both linear and
+   dBm units, for use in experiment planning and cross-checks.
+
+ASSUMPTIONS
+-----------
+- One mean noise value per run (from converged_result.json). Run-to-
+  run variance is not modeled; residuals capture it implicitly.
+- OLS assumes homoscedastic, uncorrelated residuals. With few runs
+  this cannot be formally tested, so residuals should be inspected
+  visually using the output plot.
+- Absolute dBm values depend on the measurement bandwidth (ENBW) set
+  in get_data_with_convergence.py. The slope ratio used in
+  calculate_squeezing.py is bandwidth-independent provided both
+  datasets use identical acquisition settings.
+"""
+
 import json
 import re
 import sys

@@ -188,7 +188,7 @@ def interactive_calculator(
         print("  [2] Total Noise (dBm)")
         print("  [3] Shot Noise (linear)")
         print("  [4] Shot Noise (dBm)")
-        print("  [q] Quit Calculator & Display Plots")
+        print("  [q] Quit Calculator")
 
         choice = input("\nEnter choice (1-4 or q): ").strip().lower()
 
@@ -344,34 +344,29 @@ def main():
     print(f"              (P = optical beam power, in {p_unit})       ")
     print("==========================================================")
 
-    print(f" Total Noise ({n_unit}):")
+    print(f" (1) Total Noise ({n_unit}):")
     print(f"   N_total = {k:.4f} * P + {N_dark_disp:.4f}")
     print()
 
-    print(" Total Noise (dBm):")
+    print(" (2) Total Noise (dBm):")
     print(f"   a = {a_term:.5f}")
     print(f"   C = {c_term:.6f}")
     print("   Full equation:")
     print(f"   N ~ {a_term:.5f} + {log2_coeff:.4f} log\u2082(P + {c_term:.6f})")
     print()
 
-    print(f" Shot Noise ({n_unit}):")
+    print(f" (3) Shot Noise ({n_unit}):")
     print(f"   N_shot  = {k:.4f} * P")
     print()
 
-    print(" Shot Noise (dBm):")
+    print(" (4) Shot Noise (dBm):")
     print("   Full equation:")
     print(f"   N ~ {a_term:.5f} + {log2_coeff:.4f} log\u2082(P)")
 
     print("==========================================================\n")
 
     # ------------------------------------------------------------------
-    # 5c. Interactive Equation Evaluation Loop
-    # ------------------------------------------------------------------
-    interactive_calculator(k, N_dark_disp, a_term, c_term, p_unit, n_unit)
-
-    # ------------------------------------------------------------------
-    # 6. Build Matplotlib Figure
+    # 6. Build Matplotlib Figure (Now displayed BEFORE calculator)
     # ------------------------------------------------------------------
     max_p = (
         df["Power_Display"].max() * 1.1
@@ -510,8 +505,19 @@ def main():
     ax_res.set_ylim(-res_bound, res_bound)
 
     plt.tight_layout()
-    plt.show()
+    # Draw plot in non-blocking mode so the script can proceed to the interactive calculator
+    plt.show(block=False)
+    plt.pause(0.1)
 
+    # ------------------------------------------------------------------
+    # 7. Interactive Equation Evaluation Loop
+    # ------------------------------------------------------------------
+    interactive_calculator(k, N_dark_disp, a_term, c_term, p_unit, n_unit)
+
+    # Keep the plot window alive after the user quits the calculator loop
+    if plt.fignum_exists(fig.number):
+        print("Close the plot window to exit the script completely.")
+        plt.show()
 
 if __name__ == "__main__":
     main()

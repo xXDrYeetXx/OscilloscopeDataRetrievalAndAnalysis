@@ -1,7 +1,5 @@
 # Technical Report: Automated Noise Acquisition and Squeezing Analysis
 
-**Institution:** University of Florida
-
 ---
 
 ## 1. Purpose

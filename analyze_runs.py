@@ -879,6 +879,7 @@ def cluster_bootstrap_calibration(
     repetitions: int,
     random_seed: int,
     confidence_level: float,
+    watts_to_display: float,
 ) -> dict:
     """Resample long acquisitions within each run independently."""
     rng = np.random.default_rng(random_seed)
@@ -895,8 +896,7 @@ def cluster_bootstrap_calibration(
             selected = rng.integers(0, nc, size=nc)
             s_sum = float(np.sum(sums[selected]))
             s_count = float(np.sum(counts[selected]))
-            bootstrap_means[ri] = s_sum / s_count
-
+            bootstrap_means[ri] = (s_sum / s_count) * watts_to_display
         try:
             bf = solve_wls(x, bootstrap_means, variances)
             slope_samples[bi] = bf["slope"]
@@ -1516,6 +1516,7 @@ def run_single_calibration(
         repetitions=CLUSTER_BOOTSTRAP_REPETITIONS,
         random_seed=RANDOM_SEED + 1,
         confidence_level=CONFIDENCE_LEVEL,
+        watts_to_display=watts_to_display,
     )
 
     loo = leave_one_run_out_analysis(
@@ -1692,8 +1693,6 @@ def plot_combined(
     ax_res.set_ylabel("Residual")
     ax_res.grid(True, linestyle=":", alpha=0.6)
 
-    fig.tight_layout()
-
     png_path = Path(figure_path_png).resolve()
     pdf_path = Path(figure_path_pdf).resolve()
     fig.savefig(png_path, dpi=300, bbox_inches="tight")
@@ -1796,8 +1795,6 @@ def plot_single(
     ax_res.set_xlabel(f"Optical beam power ({power_unit})")
     ax_res.set_ylabel(f"Residual\n({noise_unit})")
     ax_res.grid(True, linestyle=":", alpha=0.6)
-
-    fig.tight_layout()
 
     png_path = Path(figure_path_png).resolve()
     pdf_path = Path(figure_path_pdf).resolve()

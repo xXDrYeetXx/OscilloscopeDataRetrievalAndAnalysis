@@ -114,7 +114,7 @@ print(f"  Noise ratio  R = {measured_noise_ratio:.6f} ± {sigma_ratio:.6f}")
 print(f"  Squeezing      = {measured_level_db:.4f} ± {sigma_db:.4f} dB")
 print("=" * 50)
 print("")
-print("Uncertainty: 1σ")
+print("The uncertainty here is the same as of the numbers inputted.")
 if measured_level_db < 0:
     print(
         f"This is a {abs(measured_level_db):.4f} ± {sigma_db:.4f} dB squeezing reduction "

@@ -21,6 +21,7 @@ Squeezing is measured by comparing the power-dependent noise slope of squeezed l
 | `get_data_with_convergence.py` | Acquires waveforms and computes converged noise power |
 | `analyze_runs.py` | Fits noise power as a function of optical beam power |
 | `calculate_squeezing.py` | Computes squeezing from the ratio of two calibration slopes |
+| `is_v3_in_range_correlated_with_noise.py` | Diagnostic check of whether the \|V3\| balance threshold is correlated with measured noise |
 
 ## 4. Data Acquisition
 
@@ -135,25 +136,20 @@ $$N(P) = kP + N_{\mathrm{dark}},$$
 
 where $P$ is optical beam power, $k$ is the beam-power-dependent noise slope, and $N_{\mathrm{dark}}$ is the fitted power-independent dark-noise intercept.
 
-The fit is performed using `numpy.linalg.lstsq` on a centered and scaled design matrix to avoid the numerical instability associated with directly inverting the unscaled normal-equation matrix. The fitted coefficients and covariance matrix are then transformed back into the original display units. In the original units the OLS solution satisfies:
+Each run contributes one point to this fit: its pooled mean noise power, and a variance from a delete-one-acquisition cluster jackknife (Section 7 applied at the run level). The fit is **inverse-variance weighted least squares**, so runs with a tighter jackknife variance are weighted more heavily. The regression is solved on a centered and scaled design matrix via `numpy.linalg.lstsq` for numerical stability, then the coefficients and covariance are transformed back into the original display units.
 
-$$\hat{\beta} = (X^\mathsf{T}X)^{-1}X^\mathsf{T}y,\quad \hat{\beta} = \begin{bmatrix}k\\N_{\mathrm{dark}}\end{bmatrix}.$$
+Parameter uncertainty is not taken from the classical OLS formula $\operatorname{Cov}(\hat{\beta}) = \hat{\sigma}^2(X^\mathsf{T}X)^{-1}$. Instead, the covariance matrix is an **HC3 heteroskedasticity-consistent sandwich estimator**, which does not assume constant residual variance across runs and inflates the estimated variance more for high-leverage points — important when only a handful of runs are available. Standard errors are the square roots of its diagonal.
 
-The parameter covariance matrix is:
+Two further, independent uncertainty estimates are obtained by resampling rather than by formula:
 
-$$\operatorname{Cov}(\hat{\beta}) = \hat{\sigma}^2(X^\mathsf{T}X)^{-1},$$
+- **Fixed-design wild bootstrap.** Leverage-adjusted residuals are multiplied by random $\pm1$ (Rademacher) weights and the model is refit thousands of times, giving a basic-bootstrap confidence interval for the slope and intercept. The same procedure is repeated under an intercept-only null model to obtain a bootstrap $p$-value for the slope.
+- **Cluster-bootstrap sensitivity.** The raw acquisition clusters within each run are resampled (rather than the fit residuals) and the model is refit, isolating how much slope uncertainty is attributable to acquisition-level sampling rather than run-to-run variation.
 
-where $\hat{\sigma}^2$ is the unbiased residual variance with $n - 2$ degrees of freedom. Standard errors are the square roots of the diagonal elements.
+Leave-one-run-out refits (each run excluded in turn) are also reported, to flag any single run that disproportionately drives the fit.
 
-Reported $\pm$ values are **standard errors**, not automatically 68% confidence intervals. Under the classical fixed-design OLS model with independent, Gaussian, homoscedastic residuals, the ratio $(\hat{\beta}_i - \beta_i)/\mathrm{SE}(\hat{\beta}_i)$ follows a $t_{n-2}$ distribution, and the exact coverage of a $\pm 1\ \mathrm{SE}$ interval is:
+The program reports weighted $R^2$, unweighted and transformed residual RMSE, the approximate HC3 $t$-statistic and $p$-value, the wild-bootstrap $p$-value, and a calibration figure with a pointwise confidence band and residual panel.
 
-$$c = P(-1 \leq T_{n-2} \leq 1),$$
-
-which converges to 68.27% only as $n \to \infty$. At $n = 6$ runs the coverage is approximately 62.6%. The script computes and reports the exact finite-sample value.
-
-The program also reports $R^2$, Pearson $r$, a two-tailed $t$-test $p$-value for the slope, the residual standard deviation, the maximum absolute residual, and a residual plot.
-
-The fitted slope $k$ and its standard error are passed to the squeezing calculation.
+The fitted slope $k$ and its saved wild-bootstrap slope samples are passed to the squeezing calculation.
 
 ## 10. Squeezing Calculation
 
@@ -175,19 +171,19 @@ Because the result uses a slope ratio, common multiplicative factors cancel when
 
 ## 11. Squeezing Uncertainty
 
-Slope standard errors are propagated by the first-order delta method, assuming independent slope estimates:
+Uncertainty on $R$ is not propagated by a delta-method formula. Instead, the two calibrations' fixed-design wild-bootstrap slope samples (Section 9) are reused directly:
 
-$$\left(\frac{\sigma_R}{R}\right)^2 = \left(\frac{\sigma_{\mathrm{sq}}}{k_{\mathrm{sq}}}\right)^2 + \left(\frac{\sigma_{\mathrm{unsq}}}{k_{\mathrm{unsq}}}\right)^2.$$
+1. Each slope's bootstrap sample set is converted to an empirical error distribution, $\delta = k^{*} - \hat{k}$.
+2. A large number of draws are taken **independently** from the reference and squeezed error distributions — independently, so that pairing samples by array index (which could inject spurious correlation if both calibrations happened to share bootstrap structure) is avoided.
+3. Each pair of draws forms one realization of the ratio:
 
-The dB uncertainty interval is obtained by transforming the linear-domain endpoints $R \pm \sigma_R$ separately through the log transform rather than applying the symmetric first-order approximation $\sigma_{\mathrm{dB}} = (10/\ln 10)\,(\sigma_R/R)$. This produces an asymmetric interval:
+$$R^{*} = \frac{\hat{k}_{\mathrm{sq}} + \delta^{*}_{\mathrm{sq}}}{\hat{k}_{\mathrm{unsq}} + \delta^{*}_{\mathrm{unsq}}}.$$
 
-$$\left[\ 10\log_{10}(R - \sigma_R),\quad 10\log_{10}(R + \sigma_R)\ \right],$$
+The spread of $R^{*}$ across all realizations gives a basic bootstrap confidence interval on $R$ directly, with no assumption that the underlying slope errors are Gaussian or that their relative size is small. Because $10\log_{10}(\cdot)$ is monotonic, the confidence interval's endpoints are transformed into dB and percent-reduction endpoints after the fact, rather than propagating a single error estimate through the log:
 
-which correctly reflects the concavity of the logarithm. If $R - \sigma_R \leq 0$, the lower bound is undefined and reported as such. The symmetric approximation remains valid when the relative SE is small (below roughly 15–20%) but the asymmetric form is used throughout for consistency.
+$$\left[\ 10\log_{10}(R_{\mathrm{low}}),\quad 10\log_{10}(R_{\mathrm{high}})\ \right].$$
 
-Reported $\pm$ values represent one standard error. The one-standard-error percentage range is evaluated at $R \pm \sigma_R$:
-
-$$Q_{\mathrm{low}} = (1 - R - \sigma_R) \times 100\%, \quad Q_{\mathrm{high}} = (1 - R + \sigma_R) \times 100\%.$$
+A realization is excluded from $R^{*}$ if its reference-slope draw is nonpositive, since a negative calibration slope cannot meaningfully appear in the denominator. The fraction of excluded draws is reported as a diagnostic: a large fraction indicates $R$ is only weakly identified, and the interval should not be treated as reliable. If the resulting interval on $R$ itself includes a nonpositive value, the dB interval is undefined and reported as such rather than silently omitted.
 
 ## 12. Output Files
 
@@ -205,10 +201,10 @@ Each run is stored in a numbered directory under `v3_converged_noise_data`.
 1. Squeezed and unsqueezed datasets use identical acquisition and analysis settings.
 2. The 50 Ω reference impedance represents the actual electrical measurement configuration.
 3. The noise response is approximately linear over the selected optical-power range.
-4. OLS residuals are approximately independent with constant variance. With few runs this cannot be formally tested; the residual plot should be inspected.
-5. Student-$t$ $p$-values and the finite-sample $\pm 1\ \mathrm{SE}$ coverage are exact only under normally distributed residuals.
+4. Run-level uncertainty from the weighted fit is summarized with an HC3 sandwich covariance and cross-checked with a wild bootstrap and a cluster bootstrap; with few runs, all three should be compared rather than any one trusted alone.
+5. The approximate HC3 $t$-test $p$-value assumes near-normal residuals; the wild-bootstrap $p$-value does not, and is the preferred figure when there are few runs.
 6. Squeezed and unsqueezed slope estimates are statistically independent.
-7. First-order uncertainty propagation through the slope ratio is adequate when the relative SE on $R$ is small. The asymmetric transformed-endpoint dB interval is used regardless.
+7. Squeezing uncertainty is obtained by independently resampling the two calibrations' bootstrap slope distributions rather than by first-order error propagation, so no small-relative-error assumption is required. The confidence interval is transformed into dB after resampling, since the transform is monotonic.
 8. The balance-selection threshold does not introduce a material difference between the two datasets.
 
 The reported result is directly observed squeezing at the measurement system. No correction for optical loss or detection efficiency is applied. If source squeezing is to be inferred, the correction method, detection efficiency, and its uncertainty must be reported separately.

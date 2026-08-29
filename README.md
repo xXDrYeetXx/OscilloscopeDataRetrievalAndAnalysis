@@ -5,21 +5,21 @@ Python tools for acquiring balanced-photodetector noise from a Keysight oscillos
 
 ## Programs
 
-The repository contains three main programs:
+The repository contains three main programs, plus one diagnostic script:
 
 | Program | Purpose |
 |---|---|
 | `get_data_with_convergence.py` | Acquires and processes oscilloscope waveforms |
 | `analyze_runs.py` | Fits noise power as a function of optical beam power |
 | `calculate_squeezing.py` | Compares squeezed and unsqueezed slopes |
+| `is_v3_in_range_correlated_with_noise.py` | Checks whether the balance threshold on \|V3\| is correlated with the measured noise |
 
 ## Workflow
 
-1. Collect unsqueezed calibration runs at several beam powers.
-2. Analyze those runs and record the fitted slope and standard error.
-3. Collect squeezed runs using the same acquisition settings.
-4. Analyze the squeezed runs.
-5. Enter both slopes and standard errors into `calculate_squeezing.py`.
+1. Collect unsqueezed (reference) calibration runs at several beam powers.
+2. Collect squeezed runs using the same acquisition settings.
+3. Run `analyze_runs.py` and choose squeezing-comparison mode to fit both groups and compute the squeezing result in one pass — or run it twice in single-calibration mode, once per dataset.
+4. If using single-calibration mode, pass the two saved `*_calibration_results.json` files to `calculate_squeezing.py` to compute the squeezing result.
 
 ## Requirements
 
@@ -109,7 +109,9 @@ After collecting runs at several optical powers, run:
 python analyze_runs.py
 ```
 
-Enter run numbers using individual values, ranges, or both:
+You'll first be asked whether to do a squeezing comparison (`y`/`n`). Choosing `n` fits one calibration group; choosing `y` splits the selected runs into reference and squeezed groups automatically using each run's `squeezing_device_present` field, fits both, and computes the squeezing result in the same pass.
+
+Then enter run numbers using individual values, ranges, or both:
 
 ```text
 1,3-5,8
@@ -121,7 +123,7 @@ or:
 26-31
 ```
 
-The program reads `converged_result.json` from each selected run and fits:
+The program reads `converged_result.json` and `zero_pairs.csv` from each selected run and fits, by inverse-variance weighted least squares:
 
 $$
 N(P)=kP+N_{\mathrm{dark}},
@@ -133,36 +135,35 @@ where:
 - $k$ is the beam-power-dependent noise slope,
 - $N_{\mathrm{dark}}$ is the fitted power-independent intercept.
 
+Each run's weight comes from a delete-one-acquisition cluster jackknife variance, so correlated subwindows within one run are never treated as independent samples.
+
 The program reports:
 
-- slope and standard error,
-- intercept and standard error,
-- Pearson correlation coefficient,
-- coefficient of determination,
-- two-tailed slope p-value,
-- maximum absolute residual,
-- linear and dBm calibration equations.
+- slope and intercept, each with an HC3 (heteroskedasticity-robust) standard error,
+- a wild-bootstrap confidence interval for the slope and intercept, plus a bootstrap p-value for the slope,
+- a cluster-bootstrap sensitivity range for the slope,
+- weighted R² and residual RMSE,
+- leave-one-run-out slope sensitivity for every run.
 
-It also displays the calibration curve and residual plot.
+It also saves a calibration figure with a pointwise 95% interval and a residual panel.
 
 An example result is:
 
 ```text
-Responsiveness Slope (k): 1.7891 ± 0.0575 nW/mW
+Slope k: 1.7891 ± 0.0575 nW/mW
 ```
 
-For the squeezing calculation, enter:
-
-- `1.7891` as the slope,
-- `0.0575` as the slope standard error.
+Single-calibration mode saves `calibration_calibration_results.json` and `calibration_bootstrap_slope_samples.npz`, which `calculate_squeezing.py` reads directly — there's no manual entry of slopes or standard errors.
 
 ## 3. Squeezing calculation
 
-After separately analyzing squeezed and unsqueezed datasets, run:
+After separately analyzing squeezed and unsqueezed datasets in single-calibration mode, run:
 
 ```bash
-python calculate_squeezing.py
+python calculate_squeezing.py reference_calibration_results.json squeezed_calibration_results.json
 ```
+
+The matching `*_bootstrap_slope_samples.npz` file must sit alongside each JSON file, since the script reads the saved wild-bootstrap slope samples rather than a single standard error. Optional flags: `--repetitions`, `--confidence-level`, `--seed`, `--output`.
 
 The program calculates the normalized noise ratio:
 
@@ -190,30 +191,22 @@ The interpretation is:
 - $R=1$: equal to the unsqueezed reference,
 - $R>1$: noise above the unsqueezed reference.
 
-The program propagates the two slope standard errors using:
-
-$$
-\left(\frac{\sigma_R}{R}\right)^2
-=
-\left(
-\frac{\sigma_{\mathrm{sq}}}{k_{\mathrm{sq}}}
-\right)^2
-+
-\left(
-\frac{\sigma_{\mathrm{unsq}}}{k_{\mathrm{unsq}}}
-\right)^2.
-$$
-
-Reported `±` values are one standard error unless otherwise stated.
+Uncertainty is not propagated analytically. Instead, the script draws independently from each dataset's saved wild-bootstrap slope distribution, forms the ratio for each pair of draws, and builds a basic bootstrap confidence interval on $R$. That interval is then transformed into dB and percent-reduction intervals. Bootstrap draws with a nonpositive reference slope are excluded from the ratio, but their fraction is reported as a diagnostic — a large fraction means $R$ is poorly identified.
 
 Example output:
 
 ```text
-Noise ratio R = 0.666667 ± 0.044942
-Squeezing    = -1.7609 ± 0.2928 dB
+Noise ratio R = k_sq/k_ref: 0.666667
+Basic-bootstrap 95% interval: [R_low, R_high]
 
-This is a 1.7609 ± 0.2928 dB squeezing reduction
-(28.84% to 37.83% lower noise than shot noise, ±1 SE).
+Signed noise change 10 log10(R): -1.7609 dB
+95% interval: [low, high] dB
+
+Squeezing magnitude -10 log10(R): 1.7609 dB
+95% interval: [low, high] dB
+
+Noise reduction: 33.333%
+95% interval: [low, high]%
 ```
 
 ## Output structure
@@ -271,9 +264,9 @@ Common multiplicative scaling factors cancel in the slope ratio only when the tw
 
 ## Statistical notes
 
-`analyze_runs.py` uses ordinary least squares. The reported slope standard error assumes approximately independent, constant-variance residuals.
+`analyze_runs.py` uses inverse-variance weighted least squares, weighting each run by a delete-one-acquisition cluster jackknife variance rather than treating subwindows as independent samples. Slope/intercept uncertainty is reported three ways: an HC3 sandwich standard error, a fixed-design wild-bootstrap confidence interval and p-value, and a cluster-bootstrap sensitivity range. Leave-one-run-out sensitivity is also reported.
 
-`calculate_squeezing.py` uses first-order uncertainty propagation and assumes that the squeezed and unsqueezed slope estimates are independent.
+`calculate_squeezing.py` does not use first-order (delta-method) error propagation. It draws independently from the two calibrations' saved wild-bootstrap slope distributions and builds a basic bootstrap interval directly on the ratio, which is then transformed into dB and percent-reduction intervals. It assumes the squeezed and unsqueezed slope estimates are independent.
 
 `get_data_with_convergence.py` uses a cluster bootstrap in which complete long acquisitions are resampled. This avoids treating all subwindows from one acquisition as statistically independent.
 
@@ -315,4 +308,4 @@ python -m pip install -r requirements.txt
 
 ## Documentation
 
-See [`Technical Report.md`](Technical%20Report.md) for a detailed description of the acquisition, spectral analysis, convergence procedure, calibration model, and squeezing uncertainty calculation.
+See [`AI Generated Report.md`](AI%20Generated%20Report.md) for a detailed description of the acquisition, spectral analysis, convergence procedure, calibration model, and squeezing uncertainty calculation.

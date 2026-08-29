@@ -138,7 +138,7 @@ where $P$ is optical beam power, $k$ is the beam-power-dependent noise slope, an
 
 Each run contributes one point to this fit: its pooled mean noise power, and a variance from a delete-one-acquisition cluster jackknife (Section 7 applied at the run level). The fit is **inverse-variance weighted least squares**, so runs with a tighter jackknife variance are weighted more heavily. The regression is solved on a centered and scaled design matrix via `numpy.linalg.lstsq` for numerical stability, then the coefficients and covariance are transformed back into the original display units.
 
-Parameter uncertainty is not taken from the classical OLS formula $\operatorname{Cov}(\hat{\beta}) = \hat{\sigma}^2(X^\mathsf{T}X)^{-1}$. Instead, the covariance matrix is an **HC3 heteroskedasticity-consistent sandwich estimator**, which does not assume constant residual variance across runs and inflates the estimated variance more for high-leverage points — important when only a handful of runs are available. Standard errors are the square roots of its diagonal.
+Parameter uncertainty is not taken from the classical OLS formula $\mathrm{Cov}(\hat{\beta}) = \hat{\sigma}^2(X^\mathsf{T}X)^{-1}$. Instead, the covariance matrix is an **HC3 heteroskedasticity-consistent sandwich estimator**, which does not assume constant residual variance across runs and inflates the estimated variance more for high-leverage points — important when only a handful of runs are available. Standard errors are the square roots of its diagonal.
 
 Two further, independent uncertainty estimates are obtained by resampling rather than by formula:
 

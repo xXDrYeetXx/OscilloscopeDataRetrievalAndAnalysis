@@ -177,7 +177,9 @@ Uncertainty on $R$ is not propagated by a delta-method formula. Instead, the two
 2. A large number of draws are taken **independently** from the reference and squeezed error distributions — independently, so that pairing samples by array index (which could inject spurious correlation if both calibrations happened to share bootstrap structure) is avoided.
 3. Each pair of draws forms one realization of the ratio:
 
-$$R^{*} = \frac{\hat{k}_{\mathrm{sq}} + \delta^{*}_{\mathrm{sq}}}{\hat{k}_{\mathrm{unsq}} + \delta^{*}_{\mathrm{unsq}}}.$$
+$$
+R_{\mathrm{}} = \frac{\hat{k}_{\mathrm{sq}} + \delta_{\mathrm{sq}}}{\hat{k}_{\mathrm{unsq}} + \delta^{*}_{\mathrm{unsq}}}.
+$$
 
 The spread of $R^{*}$ across all realizations gives a basic bootstrap confidence interval on $R$ directly, with no assumption that the underlying slope errors are Gaussian or that their relative size is small. Because $10\log_{10}(\cdot)$ is monotonic, the confidence interval's endpoints are transformed into dB and percent-reduction endpoints after the fact, rather than propagating a single error estimate through the log:
 

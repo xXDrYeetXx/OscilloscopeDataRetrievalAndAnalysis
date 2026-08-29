@@ -1239,7 +1239,7 @@ def build_calibration_result(
     """Build the JSON-serialisable result for one calibration."""
     watts_to_display = 1e3 * noise_scale
 
-    slope_si = fit["slope"] / watts_to_display * (1.0 / power_scale)
+    slope_si = (fit["slope"] / watts_to_display) * (power_scale * 1e3)
     intercept_si = fit["intercept"] / watts_to_display
 
     return {
@@ -1334,7 +1334,7 @@ def save_calibration_outputs(
     watts_to_display = 1e3 * noise_scale
 
     slope_samples_si = (
-        wild["slope_samples"] / watts_to_display * (1.0 / power_scale)
+        (wild["slope_samples"] / watts_to_display) * (power_scale * 1e3)
     )
 
     npz_path = Path(
@@ -1969,10 +1969,10 @@ def main() -> None:
 
     # ── Convert bootstrap slopes to SI ────────────────────────────────
     def to_si(samples: np.ndarray, pscale: float, nscale: float) -> np.ndarray:
-        return samples / (1e3 * nscale) * (1.0 / pscale)
+        return (samples / (1e3 * nscale)) * (pscale * 1e3)
 
-    ref_slope_si = fit_ref["slope"] / (1e3 * nscale_ref) * (1.0 / pscale_ref)
-    sq_slope_si  = fit_sq["slope"]  / (1e3 * nscale_sq)  * (1.0 / pscale_sq)
+    ref_slope_si = (fit_ref["slope"] / (1e3 * nscale_ref)) * (pscale_ref * 1e3)
+    sq_slope_si  = (fit_sq["slope"]  / (1e3 * nscale_sq))  * (pscale_sq * 1e3)
 
     ref_samples_si = to_si(wild_ref["slope_samples"], pscale_ref, nscale_ref)
     sq_samples_si  = to_si(wild_sq["slope_samples"],  pscale_sq,  nscale_sq)

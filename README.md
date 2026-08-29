@@ -50,7 +50,7 @@ $$
 Each long acquisition is divided into non-overlapping 1.5 µs subwindows. A subwindow is accepted when:
 
 $$
-\left|\operatorname{mean}(V_3)\right|\leq5\ \mathrm{mV}.
+\left|\mathrm{mean}(V_3)\right| \leq 5\ \mathrm{mV}.
 $$
 
 For each accepted subwindow, the program calculates the noise near 10 MHz using a mean-detrended, periodic-Hann, single-bin DFT.

@@ -2121,5 +2121,390 @@ def main() -> None:
     )
 
 
+# =====================================================================
+# POST-ANALYSIS QUALITY-CONTROL AUDIT
+# =====================================================================
+def run_quality_control_audit(
+    diagnostics_path: Path,
+    results_path: Path,
+    base_folder: str = ".",
+) -> list[str]:
+    """
+    Inspect calibration and acquisition diagnostics.
+
+    This audit only prints warnings. It does not modify results or
+    determine statistical validity by itself.
+    """
+    warnings: list[str] = []
+    label = diagnostics_path.stem.replace("_calibration_diagnostics", "")
+    if label == "calibration_diagnostics":
+        label = "calibration"
+
+    # Conservative, user-adjustable warning thresholds.
+    MAX_RELATIVE_RUN_SE = 0.05
+    MAX_STANDARDIZED_RESIDUAL = 3.0
+    MIN_WEIGHTED_R_SQUARED = 0.98
+    MAX_LOO_SLOPE_CHANGE = 0.10
+    MAX_RELATIVE_SLOPE_CI_WIDTH = 0.25
+    MAX_RECENT_BLOCK_PAIR_RATIO = 2.0
+    MIN_ACQUISITION_CLUSTERS = 100
+
+    try:
+        df = pd.read_csv(diagnostics_path)
+    except (OSError, pd.errors.ParserError) as error:
+        return [f"{label}: could not read diagnostics CSV: {error}"]
+
+    try:
+        with results_path.open("r", encoding="utf-8") as file:
+            result = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"{label}: could not read calibration JSON: {error}"]
+
+    # -----------------------------------------------------------------
+    # Basic numeric integrity
+    # -----------------------------------------------------------------
+    numeric_columns = df.select_dtypes(include=[np.number]).columns
+    for column in numeric_columns:
+        values = df[column].to_numpy(dtype=float)
+        if not np.all(np.isfinite(values)):
+            warnings.append(
+                f"{label}: column {column!r} contains NaN or infinity."
+            )
+
+    if len(df) < 6:
+        warnings.append(
+            f"{label}: only {len(df)} calibration runs were used; "
+            "small-sample uncertainty may be fragile."
+        )
+
+    if "Power_mW" in df and df["Power_mW"].nunique() < 3:
+        warnings.append(
+            f"{label}: fewer than three distinct beam powers were used."
+        )
+
+    # -----------------------------------------------------------------
+    # Run-level precision and residuals
+    # -----------------------------------------------------------------
+    required = {"Noise_Watts", "Run_SE_Watts"}
+    if required.issubset(df.columns):
+        noise = df["Noise_Watts"].to_numpy(dtype=float)
+        run_se = df["Run_SE_Watts"].to_numpy(dtype=float)
+        relative_se = np.divide(
+            run_se,
+            np.abs(noise),
+            out=np.full_like(run_se, np.nan),
+            where=noise != 0,
+        )
+        if np.any(relative_se > MAX_RELATIVE_RUN_SE):
+            bad_runs = df.loc[
+                relative_se > MAX_RELATIVE_RUN_SE, "Run"
+            ].astype(int).tolist()
+            warnings.append(
+                f"{label}: run-level SE exceeds "
+                f"{100 * MAX_RELATIVE_RUN_SE:.1f}% for Run(s) "
+                + ", ".join(map(str, bad_runs))
+                + "."
+            )
+
+    residual_columns = {"Residual_Display", "Run_SE_Display"}
+    if residual_columns.issubset(df.columns):
+        residual = df["Residual_Display"].to_numpy(dtype=float)
+        residual_se = df["Run_SE_Display"].to_numpy(dtype=float)
+        standardized = np.divide(
+            residual,
+            residual_se,
+            out=np.full_like(residual, np.nan),
+            where=residual_se > 0,
+        )
+        bad = np.abs(standardized) > MAX_STANDARDIZED_RESIDUAL
+        if np.any(bad):
+            bad_runs = df.loc[bad, "Run"].astype(int).tolist()
+            warnings.append(
+                f"{label}: |residual/SE| exceeds "
+                f"{MAX_STANDARDIZED_RESIDUAL:.1f} for Run(s) "
+                + ", ".join(map(str, bad_runs))
+                + "; inspect for an outlier or model mismatch."
+            )
+
+    if "Acquisition_Clusters" in df.columns:
+        clusters = df["Acquisition_Clusters"].to_numpy(dtype=float)
+        if np.min(clusters) < MIN_ACQUISITION_CLUSTERS:
+            bad_runs = df.loc[
+                clusters < MIN_ACQUISITION_CLUSTERS, "Run"
+            ].astype(int).tolist()
+            warnings.append(
+                f"{label}: fewer than {MIN_ACQUISITION_CLUSTERS} "
+                "qualifying acquisition clusters in Run(s) "
+                + ", ".join(map(str, bad_runs))
+                + "."
+            )
+
+    # -----------------------------------------------------------------
+    # Fit-level diagnostics
+    # -----------------------------------------------------------------
+    estimation = result.get("estimation", {})
+    r_squared = estimation.get("weighted_r_squared")
+    if (
+        isinstance(r_squared, (int, float))
+        and math.isfinite(r_squared)
+        and r_squared < MIN_WEIGHTED_R_SQUARED
+    ):
+        warnings.append(
+            f"{label}: weighted R² is {r_squared:.5f}, below the "
+            f"{MIN_WEIGHTED_R_SQUARED:.2f} audit threshold."
+        )
+
+    slope = estimation.get("slope")
+    if isinstance(slope, (int, float)) and slope <= 0:
+        warnings.append(
+            f"{label}: fitted slope is nonpositive ({slope:.6g})."
+        )
+
+    wild = result.get("fixed_design_wild_bootstrap", {})
+    wild_ci = wild.get("slope_basic_interval", [None, None])
+    if (
+        isinstance(slope, (int, float))
+        and math.isfinite(slope)
+        and slope != 0
+        and len(wild_ci) == 2
+        and all(isinstance(v, (int, float)) for v in wild_ci)
+        and all(math.isfinite(v) for v in wild_ci)
+    ):
+        relative_width = abs(wild_ci[1] - wild_ci[0]) / abs(slope)
+        if relative_width > MAX_RELATIVE_SLOPE_CI_WIDTH:
+            warnings.append(
+                f"{label}: wild-bootstrap slope CI width is "
+                f"{100 * relative_width:.1f}% of the slope estimate."
+            )
+        if wild_ci[0] <= 0 <= wild_ci[1]:
+            warnings.append(
+                f"{label}: wild-bootstrap slope interval includes zero."
+            )
+
+    cluster = result.get("within_run_cluster_bootstrap_sensitivity", {})
+    cluster_ci = cluster.get("slope_percentile_interval", [None, None])
+    if (
+        len(wild_ci) == 2
+        and len(cluster_ci) == 2
+        and all(
+            isinstance(v, (int, float)) and math.isfinite(v)
+            for v in [*wild_ci, *cluster_ci]
+        )
+        and (wild_ci[1] < cluster_ci[0] or cluster_ci[1] < wild_ci[0])
+    ):
+        warnings.append(
+            f"{label}: wild- and cluster-bootstrap slope intervals "
+            "do not overlap."
+        )
+
+    # -----------------------------------------------------------------
+    # Leave-one-run-out sensitivity
+    # -----------------------------------------------------------------
+    loo_records = result.get("leave_one_run_out", [])
+    for record in loo_records:
+        change = record.get("Relative_Slope_Change")
+        run_number = record.get("Run", "?")
+        if (
+            isinstance(change, (int, float))
+            and math.isfinite(change)
+            and abs(change) > MAX_LOO_SLOPE_CHANGE
+        ):
+            warnings.append(
+                f"{label}: omitting Run {run_number} changes the slope "
+                f"by {100 * change:+.1f}%."
+            )
+
+    # -----------------------------------------------------------------
+    # Upstream convergence and acceptance-rate diagnostics
+    # -----------------------------------------------------------------
+    base_directory = Path(base_folder).expanduser().resolve()
+
+    if "Run" in df.columns:
+        for run_value in df["Run"]:
+            run_number = int(run_value)
+            run_directory = base_directory / f"Run {run_number}"
+            metadata_path = run_directory / "converged_result.json"
+            convergence_path = run_directory / "convergence_history.csv"
+            pairs_path = run_directory / "zero_pairs.csv"
+
+            metadata: dict = {}
+            try:
+                with metadata_path.open("r", encoding="utf-8") as file:
+                    metadata = json.load(file)
+            except (OSError, json.JSONDecodeError):
+                warnings.append(
+                    f"{label}: could not audit metadata for Run {run_number}."
+                )
+                continue
+
+            if not bool(metadata.get("converged", False)):
+                warnings.append(
+                    f"{label}: Run {run_number} is marked non-converged."
+                )
+
+            final_relative_ci = metadata.get(
+                "final_relative_ci_half_width"
+            )
+            target_relative_ci = metadata.get(
+                "target_relative_ci_half_width"
+            )
+            if (
+                isinstance(final_relative_ci, (int, float))
+                and isinstance(target_relative_ci, (int, float))
+                and math.isfinite(final_relative_ci)
+                and math.isfinite(target_relative_ci)
+                and final_relative_ci > target_relative_ci
+            ):
+                warnings.append(
+                    f"{label}: Run {run_number} final relative CI "
+                    f"half-width ({100 * final_relative_ci:.2f}%) exceeds "
+                    f"its target ({100 * target_relative_ci:.2f}%)."
+                )
+
+            if convergence_path.is_file():
+                try:
+                    history = pd.read_csv(convergence_path)
+                    if not history.empty:
+                        last = history.iloc[-1]
+                        if "passed" in history.columns:
+                            passed_text = str(last["passed"]).lower()
+                            if passed_text not in {"true", "1", "1.0"}:
+                                warnings.append(
+                                    f"{label}: the final recorded "
+                                    f"convergence check for Run {run_number} "
+                                    "did not pass."
+                                )
+                except (OSError, pd.errors.ParserError):
+                    warnings.append(
+                        f"{label}: could not read convergence history "
+                        f"for Run {run_number}."
+                    )
+
+            # Compare accepted-pair totals in the final two stability
+            # blocks while preserving complete acquisitions.
+            if pairs_path.is_file():
+                try:
+                    pair_data = pd.read_csv(
+                        pairs_path,
+                        usecols=["long_acquisition_number"],
+                    )
+                    counts = (
+                        pair_data.groupby(
+                            "long_acquisition_number", sort=True
+                        )
+                        .size()
+                        .to_numpy(dtype=float)
+                    )
+                    block_size = int(
+                        metadata.get(
+                            "stability_block_acquisitions", 50
+                        )
+                    )
+                    if block_size > 0 and counts.size >= 2 * block_size:
+                        preceding_pairs = float(
+                            np.sum(counts[-2 * block_size:-block_size])
+                        )
+                        recent_pairs = float(
+                            np.sum(counts[-block_size:])
+                        )
+                        smaller = min(preceding_pairs, recent_pairs)
+                        larger = max(preceding_pairs, recent_pairs)
+                        ratio = (
+                            larger / smaller
+                            if smaller > 0
+                            else math.inf
+                        )
+                        if ratio > MAX_RECENT_BLOCK_PAIR_RATIO:
+                            warnings.append(
+                                f"{label}: Run {run_number}'s final two "
+                                "stability blocks contain strongly unequal "
+                                f"accepted-pair totals ({preceding_pairs:.0f} "
+                                f"versus {recent_pairs:.0f}; ratio "
+                                f"{ratio:.2f}). The fixed-block convergence "
+                                "test may have unequal precision."
+                            )
+                except (
+                    OSError,
+                    ValueError,
+                    pd.errors.ParserError,
+                ):
+                    warnings.append(
+                        f"{label}: could not audit acceptance distribution "
+                        f"for Run {run_number}."
+                    )
+
+    return warnings
+
+
+def audit_outputs_created_by_main(
+    program_start_time: float,
+    base_folder: str = ".",
+) -> None:
+    """Audit only diagnostics files written during this invocation."""
+    output_pairs = [
+        (
+            Path("calibration_diagnostics.csv"),
+            Path("calibration_calibration_results.json"),
+        ),
+        (
+            Path("reference_calibration_diagnostics.csv"),
+            Path("reference_calibration_results.json"),
+        ),
+        (
+            Path("squeezed_calibration_diagnostics.csv"),
+            Path("squeezed_calibration_results.json"),
+        ),
+    ]
+
+    all_warnings: list[str] = []
+    audited = 0
+
+    for diagnostics_path, results_path in output_pairs:
+        if not diagnostics_path.is_file() or not results_path.is_file():
+            continue
+
+        # Ignore stale files left by earlier analyses.
+        if diagnostics_path.stat().st_mtime < program_start_time - 2.0:
+            continue
+
+        audited += 1
+        all_warnings.extend(
+            run_quality_control_audit(
+                diagnostics_path=diagnostics_path,
+                results_path=results_path,
+                base_folder=base_folder,
+            )
+        )
+
+    print()
+    print("=" * 68)
+    print("POST-ANALYSIS QUALITY-CONTROL AUDIT")
+    print("=" * 68)
+
+    if audited == 0:
+        print("[WARNING] No newly generated diagnostic output was found.")
+    elif all_warnings:
+        for warning in all_warnings:
+            print(f"[WARNING] {warning}")
+        print()
+        print(
+            f"Audit completed with {len(all_warnings)} warning(s). "
+            "Warnings are prompts for inspection, not automatic rejection."
+        )
+    else:
+        print(
+            "No configured warning condition was detected. "
+        )
+
+    print("=" * 68)
+
+
 if __name__ == "__main__":
+    import time
+
+    _program_start_time = time.time()
     main()
+    audit_outputs_created_by_main(
+        program_start_time=_program_start_time,
+        base_folder=".",
+    )

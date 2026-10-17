@@ -1,4 +1,3 @@
-disclaimer: lots of ai was used
 # Oscilloscope Data Retrieval and Analysis
 
 Python tools for acquiring balanced-photodetector noise from a Keysight oscilloscope, fitting shot-noise calibration curves, and calculating optical squeezing with propagated uncertainty.
